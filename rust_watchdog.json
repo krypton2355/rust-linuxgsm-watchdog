@@ -16,6 +16,19 @@
   "rcon_port": 28016,
   "tcp_timeout": 2.0,
 
+  "enable_update_watch": false,
+  "update_check_interval_seconds": 600,
+  "update_check_timeout": 60,
+
+  "enable_smoothrestarter_bridge": false,
+  "smoothrestarter_restart_delay_seconds": 300,
+  "smoothrestarter_console_cmd": "srestart restart {delay}",
+
+  "restart_request_cooldown_seconds": 3600,
+  
+  "smoothrestarter_config_path": "",
+  "smoothrestarter_plugin_path": "",
+
   "check_lgsm_details": false,
 
   "recovery_steps": ["update", "mu", "restart"],

@@ -14,6 +14,7 @@ import json
 import os
 import re
 import select
+import shutil
 import signal
 import socket
 import subprocess
@@ -21,8 +22,9 @@ import sys
 import time
 from datetime import datetime
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
+SMOOTHRESTARTER_URL = "https://umod.org/plugins/smooth-restarter"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 CFG_FOR_HINTS = None
 DEFAULTS = {
@@ -62,16 +64,42 @@ DEFAULTS = {
 
     # What to do when confirmed DOWN
     "recovery_steps": ["update", "mu", "restart"],
+
     "timeouts": {
         "update": 1800,
         "mu": 900,
         "restart": 600,
         "start": 600,
         "stop": 120,
-    }
+    },
+
+    # ---------------------------------------------------------
+    # Optional: watch for LinuxGSM server updates while RUNNING
+    # ---------------------------------------------------------
+    "enable_update_watch": False,
+    "update_check_interval_seconds": 600,
+    "update_check_timeout": 60,
+
+    # ---------------------------------------------------------
+    # Optional: SmoothRestarter bridge
+    # ---------------------------------------------------------
+    "enable_smoothrestarter_bridge": False,
+    "smoothrestarter_restart_delay_seconds": 300,
+    "smoothrestarter_console_cmd": "srestart restart {delay}",
+
+    # Rate-limit restart requests (avoid spamming SR during loops)
+    "restart_request_cooldown_seconds": 3600,
+
+    # Optional overrides (leave empty to use the default LinuxGSM layout)
+    # If relative, they're resolved relative to server_dir.
+    "smoothrestarter_config_path": "",
+    "smoothrestarter_plugin_path": "",
 }
 
 STATUS_RE = re.compile(r"^\s*Status:\s*(\S+)\s*$", re.IGNORECASE)
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+UPDATE_YES_RE = re.compile(r"\b(update available|update required|available:\s*yes)\b", re.IGNORECASE)
+UPDATE_NO_RE  = re.compile(r"\b(no update available|available:\s*no|already up to date|up to date)\b", re.IGNORECASE)
 
 # Set to True when systemd/user requests a stop (SIGTERM/SIGINT)
 stop_requested = False
@@ -397,6 +425,22 @@ def preflight_or_die(cfg, server_dir, rustserver_path):
     if confirmations <= 0:
         fatal("config: down_confirmations must be > 0", fp=fp)
 
+    # Update-watch sanity (optional)
+    if parse_bool(cfg.get("enable_update_watch"), False):
+        try:
+            uci = int(cfg.get("update_check_interval_seconds", 0))
+            uto = int(cfg.get("update_check_timeout", 0))
+        except Exception as e:
+            fatal(f"config: update_check_* must be integers: {e}", fp=fp)
+        if uci <= 0:
+            fatal("config: update_check_interval_seconds must be > 0", fp=fp)
+        if uto <= 0:
+            fatal("config: update_check_timeout must be > 0", fp=fp)
+
+    # parse the Smooth Restarter bridge
+    if parse_bool(cfg.get("enable_smoothrestarter_bridge"), False) and not parse_bool(cfg.get("enable_update_watch"), False):
+        log("PRECHECK: NOTE: enable_smoothrestarter_bridge=true but enable_update_watch=false -- bridge will never trigger", fp)
+
     # Optional but useful sanity
     if cfg.get("check_tcp_rcon", True):
         try:
@@ -561,6 +605,222 @@ def run_cmd(cmd, cwd, fp=None, timeout=None, dry_run=False):
         except Exception:
             pass
 
+def strip_ansi(s: str) -> str:
+    return ANSI_RE.sub("", s or "")
+
+def run_cmd_capture(cmd, cwd, fp=None, timeout=None, dry_run=False):
+    """
+    Run a command and capture combined stdout/stderr.
+    Returns (rc, output). rc can be int, or string like "TIMEOUT"/"ERROR".
+    """
+    if dry_run:
+        log(f"DRY_RUN: would run: {' '.join(cmd)} (cwd={cwd})", fp)
+        return (0, "")
+
+    log(f"RUN: {' '.join(cmd)} (cwd={cwd})", fp)
+    try:
+        p = subprocess.run(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+        )
+        out = p.stdout or ""
+        log(f"EXIT {p.returncode}: {' '.join(cmd)}", fp)
+        return (p.returncode, out)
+    except subprocess.TimeoutExpired:
+        log(f"TIMEOUT after {timeout}s: {' '.join(cmd)}", fp)
+        return ("TIMEOUT", "")
+    except Exception as e:
+        log(f"ERROR running {' '.join(cmd)}: {e}", fp)
+        return ("ERROR", "")
+
+def parse_update_available(out: str):
+    """
+    Returns: True (update), False (no update), None (can't tell)
+    """
+    text = strip_ansi(out)
+    if UPDATE_NO_RE.search(text):
+        return False
+    if UPDATE_YES_RE.search(text):
+        return True
+    return None
+
+def smoothrestarter_paths(server_dir, cfg=None):
+    """
+    SmoothRestarter defaults (uMod), under LinuxGSM:
+      {server_dir}/serverfiles/oxide/config/SmoothRestarter.json
+      {server_dir}/serverfiles/oxide/plugins/SmoothRestarter.cs
+
+    Overrides (optional):
+      cfg["smoothrestarter_config_path"]
+      cfg["smoothrestarter_plugin_path"]
+
+    If an override is relative, it's resolved relative to server_dir.
+    """
+    cfg = cfg or {}
+
+    def resolve(p):
+        p = (p or "").strip()
+        if not p:
+            return ""
+        p = os.path.expandvars(os.path.expanduser(p))
+        if not os.path.isabs(p):
+            p = os.path.abspath(os.path.join(server_dir, p))
+        return p
+
+    cfg_override = resolve(cfg.get("smoothrestarter_config_path"))
+    plugin_override = resolve(cfg.get("smoothrestarter_plugin_path"))
+
+    if cfg_override and plugin_override:
+        return (cfg_override, plugin_override)
+
+    base = os.path.join(server_dir, "serverfiles", "oxide")
+    default_cfg = os.path.join(base, "config", "SmoothRestarter.json")
+    default_plugin = os.path.join(base, "plugins", "SmoothRestarter.cs")
+
+    return (
+        cfg_override or default_cfg,
+        plugin_override or default_plugin,
+    )
+
+def smoothrestarter_available(server_dir, cfg=None):
+    cfg_path, plugin_path = smoothrestarter_paths(server_dir, cfg)
+    plugin_ok = os.path.isfile(plugin_path)
+    cfg_ok = os.path.isfile(cfg_path)
+
+    # Treat plugin as "available" if the plugin file exists.
+    # Config may not exist yet on fresh installs.
+    ok = plugin_ok
+    return ok, cfg_ok, cfg_path, plugin_path
+
+def tmux_list_sessions():
+    if not shutil.which("tmux"):
+        return []
+    try:
+        out = subprocess.check_output(["tmux", "ls"], stderr=subprocess.STDOUT, text=True)
+    except subprocess.CalledProcessError:
+        return []  # rc=1 when no sessions
+    sessions = []
+    for line in out.splitlines():
+        if ":" in line:
+            sessions.append(line.split(":", 1)[0])
+    return sessions
+
+def choose_tmux_target(cfg, rustserver_path):
+    sessions = tmux_list_sessions()
+    if not sessions:
+        return None
+
+    script_name = os.path.basename(rustserver_path)  # usually "rustserver"
+    identity = str(cfg.get("identity") or "").strip()
+
+    for cand in (script_name, identity, "rustserver"):
+        if cand and cand in sessions:
+            return cand
+
+    if len(sessions) == 1:
+        return sessions[0]
+
+    for s in sessions:
+        if "rust" in s.lower():
+            return s
+
+    return None
+
+def tmux_send_line(target_session, line, fp=None, dry_run=False, timeout=5):
+    """
+    Send a line to the server console via tmux send-keys.
+    """
+    if dry_run:
+        log(f"DRY_RUN: would tmux send-keys -t {target_session} '{line}' C-m", fp)
+        return True
+
+    if not shutil.which("tmux"):
+        log("SMOOTH_BRIDGE: tmux not found in PATH", fp)
+        return False
+
+    try:
+        p = subprocess.run(
+            ["tmux", "send-keys", "-t", target_session, line, "C-m"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+        )
+        if p.returncode != 0:
+            log(f"SMOOTH_BRIDGE: tmux send-keys failed rc={p.returncode}: {strip_ansi(p.stdout).strip()}", fp)
+            return False
+        log(f"SMOOTH_BRIDGE: sent to tmux '{target_session}': {line}", fp)
+        return True
+    except subprocess.TimeoutExpired:
+        log("SMOOTH_BRIDGE: tmux send-keys timed out", fp)
+        return False
+    except Exception as e:
+        log(f"SMOOTH_BRIDGE: tmux send-keys error: {e}", fp)
+        return False
+
+def request_smooth_restart(cfg, server_dir, rustserver_path, fp=None):
+    """
+    Ask SmoothRestarter to initiate a graceful restart countdown.
+    Returns True if the request was sent successfully.
+    """
+    ok, cfg_ok, cfg_path, plugin_path = smoothrestarter_available(server_dir, cfg)
+    if not ok:
+        log(f"SMOOTH_BRIDGE: enabled but SmoothRestarter plugin not found: {plugin_path}", fp)
+        return False
+    if not cfg_ok:
+        log(f"SMOOTH_BRIDGE: NOTE: SmoothRestarter config missing (may be first run): {cfg_path}", fp)
+
+    delay = int(cfg.get("smoothrestarter_restart_delay_seconds", 300))
+    template = (cfg.get("smoothrestarter_console_cmd") or "srestart restart {delay}").strip()
+
+    if "{delay}" in template:
+        cmd = template.format(delay=delay)
+    else:
+        cmd = f"{template} {delay}"
+
+    target = choose_tmux_target(cfg, rustserver_path)
+    if not target:
+        log(f"SMOOTH_BRIDGE: could not find tmux session to target. tmux ls => {tmux_list_sessions()}", fp)
+        return False
+
+    return tmux_send_line(target, cmd, fp=fp, dry_run=cfg.get("dry_run", False))
+
+def check_server_update_via_lgsm(cfg, server_dir, rustserver_path, fp=None):
+    """
+    Run LinuxGSM check-update (or cu) and interpret output.
+    Returns: True/False/None
+    """
+    timeout = int(cfg.get("update_check_timeout", 60))
+    for subcmd in ("check-update", "cu"):
+        rc, out = run_cmd_capture(
+            [rustserver_path, subcmd],
+            server_dir,
+            fp=fp,
+            timeout=timeout,
+            dry_run=False
+        )
+
+        # Some scripts print "Unknown command" for unsupported subcommands
+        if out and ("Unknown command" in out or "Unknown option" in out):
+            continue
+
+        verdict = parse_update_available(out or "")
+        if verdict is not None:
+            return verdict
+
+        # Can't tell, but command ran
+        if out:
+            sample = "\n".join(strip_ansi(out).splitlines()[:8])
+            log(f"UPDATE_WATCH: could not interpret check-update output. First lines:\n{sample}", fp)
+        return None
+
+    log("UPDATE_WATCH: neither 'check-update' nor 'cu' seems available in this LinuxGSM script", fp)
+    return None
+
 def check_process_identity(identity, fp=None):
     """
     Strong signal: RustDedicated process exists and commandline contains +server.identity identity
@@ -713,6 +973,17 @@ def main():
     log(f"server_dir={server_dir} identity={cfg['identity']}", fp)
     log(f"recovery_steps={cfg['recovery_steps']}", fp)
 
+    # One-time SmoothRestarter info on startup (only if bridge is enabled)
+    if parse_bool(cfg.get("enable_smoothrestarter_bridge"), False):
+        ok, cfg_ok, sr_cfg, sr_plugin = smoothrestarter_available(server_dir, cfg)
+        log(f"SMOOTH_BRIDGE: expected plugin path: {sr_plugin}", fp)
+        log(f"SMOOTH_BRIDGE: expected config path: {sr_cfg}", fp)
+
+        if not ok:
+            log(f"SMOOTH_BRIDGE: SmoothRestarter not installed (plugin missing). Get it from: {SMOOTHRESTARTER_URL}", fp)
+        elif not cfg_ok:
+            log(f"SMOOTH_BRIDGE: NOTE: SmoothRestarter config missing (may be first run): {sr_cfg}", fp)
+
     if cfg.get("_recovery_steps_original") != cfg.get("recovery_steps"):
         log(
             f"NOTE: recovery_steps filtered by toggles "
@@ -724,6 +995,9 @@ def main():
 
     down_streak = 0
     paused = False
+
+    last_update_check = 0.0
+    last_restart_request = 0.0
 
     try:
         while True:
@@ -758,6 +1032,55 @@ def main():
                 log(f"DOWN streak: {down_streak}/{cfg['down_confirmations']}", fp)
             else:
                 down_streak = 0
+
+            # ---------------------------------------------------------
+            # Optional: watch for updates while server is RUNNING
+            # If update is found -> optionally request SmoothRestarter
+            # ---------------------------------------------------------
+            if state == "RUNNING" and parse_bool(cfg.get("enable_update_watch"), False):
+                now = time.monotonic()
+                interval = int(cfg.get("update_check_interval_seconds", 600))
+
+                if (now - last_update_check) >= interval:
+                    last_update_check = now
+
+                    # If the bridge is enabled, warn on every update-check tick
+                    # if SmoothRestarter isn't installed (non-fatal).
+                    if parse_bool(cfg.get("enable_smoothrestarter_bridge"), False):
+                        ok, cfg_ok, sr_cfg, sr_plugin = smoothrestarter_available(server_dir, cfg)
+                        if not ok:
+                            log(f"SMOOTH_BRIDGE: enabled but SmoothRestarter plugin not found: {sr_plugin}", fp)
+                        elif not cfg_ok:
+                            log(f"SMOOTH_BRIDGE: NOTE: SmoothRestarter config missing (may be first run): {sr_cfg}", fp)
+
+                    verdict = check_server_update_via_lgsm(cfg, server_dir, rustserver_path, fp)
+
+                    if verdict is True:
+                        log("UPDATE_WATCH: update available", fp)
+
+                        if parse_bool(cfg.get("enable_smoothrestarter_bridge"), False):
+                            cooldown = int(cfg.get("restart_request_cooldown_seconds", 3600))
+                            if (now - last_restart_request) < cooldown:
+                                left = int(cooldown - (now - last_restart_request))
+                                log(f"SMOOTH_BRIDGE: restart request cooldown active ({left}s left) -- not requesting again", fp)
+                            else:
+                                ok = request_smooth_restart(cfg, server_dir, rustserver_path, fp)
+                                if ok:
+                                    last_restart_request = now
+                                    log(
+                                        f"SMOOTH_BRIDGE: requested SmoothRestarter restart "
+                                        f"(delay={int(cfg.get('smoothrestarter_restart_delay_seconds', 300))}s)",
+                                        fp
+                                    )
+                                else:
+                                    log("SMOOTH_BRIDGE: failed to request SmoothRestarter restart", fp)
+                        else:
+                            log("UPDATE_WATCH: SmoothRestarter bridge disabled; no graceful restart requested", fp)
+
+                    elif verdict is False:
+                        log("UPDATE_WATCH: no update available", fp)
+                    else:
+                        log("UPDATE_WATCH: unknown (could not determine update availability)", fp)
 
             if state == "DOWN" and down_streak >= int(cfg["down_confirmations"]):
                 log("CONFIRMED DOWN -> recovery sequence", fp)
