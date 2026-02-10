@@ -1,0 +1,23 @@
+{
+  "server_dir": "/home/rustserver",
+  "identity": "rustserver",
+  "pause_file": "/home/rustserver/.watchdog_pause",
+  "dry_run": false,
+
+  "interval_seconds": 10,
+  "cooldown_seconds": 120,
+  "down_confirmations": 2,
+
+  "check_process_identity": true,
+
+  "check_tcp_rcon": true,
+  "rcon_host": "127.0.0.1",
+  "rcon_port": 28016,
+  "tcp_timeout": 2.0,
+
+  "check_lgsm_details": false,
+
+  "recovery_steps": ["update", "mu", "restart"],
+  "timeouts": { "update": 1800, "mu": 900, "restart": 600 }
+}
+
