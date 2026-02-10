@@ -334,6 +334,7 @@ def main():
                 if not paused:
                     log(f"PAUSED: {pause_file} exists -- skipping checks/recovery", fp)
                     paused = True
+                    down_streak = 0  # optional: don't "resume" mid-DOWN streak                 
                 if args.once:
                     break
                 time.sleep(int(cfg["interval_seconds"]))
@@ -342,6 +343,7 @@ def main():
                 if paused:
                     log(f"UNPAUSED: {pause_file} removed -- resuming", fp)
                     paused = False
+                    down_streak = 0
 
             state, evidence = health_report(cfg, server_dir, rustserver_path, fp)
             log(f"HEALTH: {state}", fp)
