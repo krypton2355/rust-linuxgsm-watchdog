@@ -1,5 +1,30 @@
-log/
-log/**
-.env
+# patches
 *.patch
 
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtualenvs
+.env
+.venv/
+venv/
+ENV/
+env/
+
+# Editor/OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs (your script can write logs here)
+log/**
+log/
+*.log
+
+# LinuxGSM odds (optional; keep if you don't want these in repo)
+# serverfiles/
+# lgsm/
+# steamcmd/
