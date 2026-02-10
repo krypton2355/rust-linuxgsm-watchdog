@@ -153,6 +153,181 @@ def sleep_interruptible(seconds):
             return
         time.sleep(0.2)
 
+# ------------------------------------
+# PRE-FLIGHT CHECKS
+# ------------------------------------
+def fatal(msg, code=2, fp=None):
+    # Log (if possible) + print to stderr + exit
+    try:
+        if fp:
+            log(f"FATAL: {msg}", fp)
+    except Exception:
+        pass
+    print(f"FATAL: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+def ensure_dir(path, what, fp=None):
+    """
+    Ensure 'path' exists and is a directory. Create it if missing.
+    """
+    if not path:
+        fatal(f"{what}: empty path", fp=fp)
+
+    if os.path.exists(path):
+        if not os.path.isdir(path):
+            fatal(f"{what}: exists but is not a directory: {path}", fp=fp)
+        return
+
+    try:
+        os.makedirs(path, exist_ok=True)
+        log(f"PRECHECK: created directory: {path}", fp)
+    except Exception as e:
+        fatal(f"{what}: cannot create directory '{path}': {e}", fp=fp)
+
+def require_dir_access(path, what, need_write=False, fp=None):
+    """
+    Directories need X to access. For write we require W+X.
+    """
+    if not os.path.isdir(path):
+        fatal(f"{what}: not a directory: {path}", fp=fp)
+
+    perms = os.R_OK | os.X_OK
+    if need_write:
+        perms = os.W_OK | os.X_OK
+
+    if not os.access(path, perms):
+        mode = "write" if need_write else "read"
+        fatal(f"{what}: no {mode} access to directory: {path}", fp=fp)
+
+def require_file_executable(path, what, fp=None):
+    if not os.path.exists(path):
+        fatal(f"{what}: missing: {path}", fp=fp)
+    if not os.path.isfile(path):
+        fatal(f"{what}: not a file: {path}", fp=fp)
+    if not os.access(path, os.X_OK):
+        fatal(f"{what}: not executable: {path}", fp=fp)
+
+def preflight_or_die(cfg, server_dir, rustserver_path):
+    """
+    Pre-flight checklist:
+    - server_dir exists + readable/writable (for updates)
+    - rustserver exists + executable
+    - lockfile dir exists/creatable + writable
+    - logfile dir exists/creatable + writable + logfile openable (if enabled)
+    - pause_file parent dir exists/creatable + writable (if enabled)
+    - basic config sanity (ports, steps, timeouts)
+    Returns an opened logfile handle (or None if logfile disabled).
+    """
+    # 0) If logfile is enabled, open it as early as possible so failures get written there too.
+    fp = None
+    logfile = (cfg.get("logfile") or "").strip()
+    if logfile:
+        log_dir = os.path.dirname(os.path.abspath(logfile)) or "."
+        ensure_dir(log_dir, "logfile directory", fp=None)
+        require_dir_access(log_dir, "logfile directory", need_write=True, fp=None)
+
+        if os.path.exists(logfile) and os.path.isdir(logfile):
+            fatal(f"logfile: path is a directory, not a file: {logfile}", fp=None)
+
+        try:
+            fp = open(logfile, "a", encoding="utf-8")
+        except Exception as e:
+            fatal(f"logfile: cannot open for append '{logfile}': {e}", fp=None)
+
+    log(f"PRECHECK: watchdog v{__version__} starting pre-flight checklist", fp)
+    log(f"PRECHECK: uid={os.geteuid()} gid={os.getegid()} cwd={os.getcwd()}", fp)
+
+    # 1) Basic config sanity (cheap failures first)
+    identity = (cfg.get("identity") or "").strip()
+    if not identity:
+        fatal("config: 'identity' is empty", fp=fp)
+
+    try:
+        interval = int(cfg.get("interval_seconds", 0))
+        cooldown = int(cfg.get("cooldown_seconds", 0))
+        confirmations = int(cfg.get("down_confirmations", 0))
+    except Exception as e:
+        fatal(f"config: interval/cooldown/confirmations must be integers: {e}", fp=fp)
+
+    if interval <= 0:
+        fatal("config: interval_seconds must be > 0", fp=fp)
+    if cooldown < 0:
+        fatal("config: cooldown_seconds must be >= 0", fp=fp)
+    if confirmations <= 0:
+        fatal("config: down_confirmations must be > 0", fp=fp)
+
+    # Optional but useful sanity
+    if cfg.get("check_tcp_rcon", True):
+        try:
+            port = int(cfg.get("rcon_port", 0))
+        except Exception:
+            fatal("config: rcon_port must be an integer", fp=fp)
+        if not (1 <= port <= 65535):
+            fatal(f"config: rcon_port out of range: {port}", fp=fp)
+
+    # Validate recovery steps are non-empty strings
+    steps = cfg.get("recovery_steps", [])
+    if not isinstance(steps, list) or not steps:
+        fatal("config: recovery_steps must be a non-empty list", fp=fp)
+    for s in steps:
+        if not isinstance(s, str) or not s.strip():
+            fatal(f"config: recovery_steps contains invalid step: {repr(s)}", fp=fp)
+
+    # Validate timeouts are numeric (if present)
+    timeouts = cfg.get("timeouts", {})
+    if not isinstance(timeouts, dict):
+        fatal("config: timeouts must be a dict", fp=fp)
+    for k, v in timeouts.items():
+        try:
+            if v is None:
+                continue
+            float(v)
+        except Exception:
+            fatal(f"config: timeout for '{k}' must be numeric or null, got: {repr(v)}", fp=fp)
+
+    # 2) server_dir must exist and be accessible (read + execute + write)
+    if not os.path.exists(server_dir):
+        fatal(f"server_dir: does not exist: {server_dir}", fp=fp)
+    if not os.path.isdir(server_dir):
+        fatal(f"server_dir: not a directory: {server_dir}", fp=fp)
+    require_dir_access(server_dir, "server_dir", need_write=True, fp=fp)
+
+    # 3) rustserver must exist and be executable
+    require_file_executable(rustserver_path, "rustserver executable", fp=fp)
+
+    # 4) lockfile directory: exists/creatable + writable
+    lockfile = (cfg.get("lockfile") or "").strip()
+    if not lockfile:
+        fatal("config: lockfile path is empty", fp=fp)
+    lock_dir = os.path.dirname(os.path.abspath(lockfile)) or "."
+    ensure_dir(lock_dir, "lockfile directory", fp=fp)
+    require_dir_access(lock_dir, "lockfile directory", need_write=True, fp=fp)
+
+    # 5) pause_file parent directory (optional)
+    pause_file = (cfg.get("pause_file") or "").strip()
+    if pause_file:
+        pause_dir = os.path.dirname(os.path.abspath(pause_file)) or "."
+        ensure_dir(pause_dir, "pause_file directory", fp=fp)
+        require_dir_access(pause_dir, "pause_file directory", need_write=True, fp=fp)
+
+    # 6) Summary
+    log("PRECHECK: checklist results:", fp)
+    log(f"  OK: server_dir writable: {server_dir}", fp)
+    log(f"  OK: rustserver executable: {rustserver_path}", fp)
+    log(f"  OK: lockfile dir writable: {lock_dir}", fp)
+    if pause_file:
+        log(f"  OK: pause_file parent dir writable: {os.path.dirname(os.path.abspath(pause_file))}", fp)
+    else:
+        log("  NOTE: pause_file disabled (empty)", fp)
+
+    if logfile:
+        log(f"  OK: logfile open: {logfile}", fp)
+    else:
+        log("  NOTE: logfile disabled (empty)", fp)
+
+    log("PRECHECK: finished OK", fp)
+    return fp
+
 def run_cmd(cmd, cwd, fp=None, timeout=None, dry_run=False):
     """
     Run a command, stream stdout live, and enforce timeout even if the process is silent.
@@ -361,18 +536,21 @@ def main():
     server_dir = os.path.abspath(cfg["server_dir"])
     rustserver_path = os.path.join(server_dir, "rustserver")
 
-    if not (os.path.isfile(rustserver_path) and os.access(rustserver_path, os.X_OK)):
-        print(f"FATAL: not executable: {rustserver_path}", file=sys.stderr)
-        sys.exit(2)
-
-    fp = None
-    if cfg.get("logfile"):
-        os.makedirs(os.path.dirname(os.path.abspath(cfg["logfile"])), exist_ok=True)
-        fp = open(cfg["logfile"], "a", encoding="utf-8")
-
     # Clean shutdown behavior under systemd (SIGTERM) and Ctrl-C (SIGINT)
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
+
+    # Pre-flight checklist (also opens logfile if enabled)
+    fp = preflight_or_die(cfg, server_dir, rustserver_path)
+
+    # if not (os.path.isfile(rustserver_path) and os.access(rustserver_path, os.X_OK)):
+    #     print(f"FATAL: not executable: {rustserver_path}", file=sys.stderr)
+    #     sys.exit(2)
+
+    # fp = None
+    # if cfg.get("logfile"):
+    #     os.makedirs(os.path.dirname(os.path.abspath(cfg["logfile"])), exist_ok=True)
+    #     fp = open(cfg["logfile"], "a", encoding="utf-8")
 
     # Guard: don’t allow recovery from inside screen/tmux
     if inside_screen_or_tmux() and not cfg.get("dry_run", False):

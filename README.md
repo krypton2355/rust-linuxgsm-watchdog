@@ -189,7 +189,8 @@ sudo systemctl restart rust-watchdog.service
 Bump `timeouts.update` / `timeouts.mu` in JSON if SteamCMD is slow, or keep them strict if you prefer fail-fast and retry later.
 
 ### History
-- v0.2.0 - global stop flag + signal handler / TCP fail handling / fixes
+- v0.2.1 - pre-flight checks, interruptible sleep, stop-aware recovery, stop escalation in run_cmd
+- v0.2.0 - stop flag + SIGTERM/SIGINT handler, TCP FAIL counts as DOWN (no “UNKNOWN forever”)
 - v0.1.0 - initial release
 
 ---
