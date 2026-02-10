@@ -188,3 +188,12 @@ sudo systemctl restart rust-watchdog.service
 
 Bump `timeouts.update` / `timeouts.mu` in JSON if SteamCMD is slow, or keep them strict if you prefer fail-fast and retry later.
 
+---
+
+### About
+
+As usual, code by [FlyingFathead](https://github.com/FlyingFathead/) with ChaosWhisperer meddling with the steering wheel.
+
+This repo's official URL: [https://github.com/FlyingFathead/rust-linuxgsm-watchdog](https://github.com/FlyingFathead/rust-linuxgsm-watchdog)
+
+**If you like this repo, remember to give it a star. ;-) Thanks.**
