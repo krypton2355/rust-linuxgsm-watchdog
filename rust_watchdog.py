@@ -540,15 +540,15 @@ def main():
     server_dir = os.path.abspath(cfg["server_dir"])
     rustserver_path = os.path.join(server_dir, "rustserver")
 
-    if not (cfg.get("check_process_identity") or cfg.get("check_tcp_rcon") or cfg.get("check_lgsm_details")):
-        fatal("config: at least one health check must be enabled", fp=fp)
-
     # Clean shutdown behavior under systemd (SIGTERM) and Ctrl-C (SIGINT)
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
 
     # Pre-flight checklist (also opens logfile if enabled)
     fp = preflight_or_die(cfg, server_dir, rustserver_path)
+
+    if not (cfg.get("check_process_identity") or cfg.get("check_tcp_rcon") or cfg.get("check_lgsm_details")):
+        fatal("config: at least one health check must be enabled", fp=fp)
 
     # if not (os.path.isfile(rustserver_path) and os.access(rustserver_path, os.X_OK)):
     #     print(f"FATAL: not executable: {rustserver_path}", file=sys.stderr)
