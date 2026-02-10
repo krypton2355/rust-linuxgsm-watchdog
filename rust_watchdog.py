@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+
+# =============================================================
+# https://github.com/FlyingFathead/rust-linuxgsm-watchdog
+# A restart & update watchdog for Rust game servers on LinuxGSM
+# FlyingFathead / 2026 / https://github.com/FlyingFathead/
+# =============================================================
+
 import argparse
 import json
 import os
@@ -10,6 +17,8 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+
+__version__ = "0.2.0"
 
 DEFAULTS = {
     "server_dir": "/home/rustserver",
@@ -51,6 +60,9 @@ DEFAULTS = {
 }
 
 STATUS_RE = re.compile(r"^\s*Status:\s*(\S+)\s*$", re.IGNORECASE)
+
+# Set to True when systemd/user requests a stop (SIGTERM/SIGINT)
+stop_requested = False
 
 def ts():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -130,6 +142,17 @@ def release_lock(lock_path):
     except FileNotFoundError:
         pass
 
+def _request_stop(signum, frame):
+    global stop_requested
+    stop_requested = True
+
+def sleep_interruptible(seconds):
+    end = time.monotonic() + float(seconds)
+    while time.monotonic() < end:
+        if stop_requested:
+            return
+        time.sleep(0.2)
+
 def run_cmd(cmd, cwd, fp=None, timeout=None, dry_run=False):
     """
     Run a command, stream stdout live, and enforce timeout even if the process is silent.
@@ -156,6 +179,34 @@ def run_cmd(cmd, cwd, fp=None, timeout=None, dry_run=False):
 
     try:
         while True:
+
+            # If systemd/user asked us to stop, abort this step.
+            if stop_requested:
+                log(f"Stop requested -- terminating: {' '.join(cmd)}", fp)
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                except Exception:
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+
+                # Give it a moment to die, then force-kill if needed
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline and p.poll() is None:
+                    time.sleep(0.2)
+
+                if p.poll() is None:
+                    try:
+                        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    except Exception:
+                        try:
+                            p.kill()
+                        except Exception:
+                            pass
+
+                raise RuntimeError(f"Stop requested -- aborting: {' '.join(cmd)}")
+
             # Hard timeout (works even if child prints nothing)
             if timeout is not None and (time.monotonic() - start) > timeout:
                 try:
@@ -274,7 +325,10 @@ def health_report(cfg, server_dir, rustserver_path, fp=None):
     if cfg.get("check_tcp_rcon", True):
         ok, msg = check_tcp(cfg["rcon_host"], int(cfg["rcon_port"]), float(cfg["tcp_timeout"]))
         evidence.append(f"tcp_rcon: {'PASS' if ok else 'FAIL'} -- {msg}")
-        if ok: running_votes += 1
+        if ok:
+            running_votes += 1
+        else:
+            down_votes += 1
 
     # 3) LGSM details (weak-ish, but informative)
     if cfg.get("check_lgsm_details", True):
@@ -296,7 +350,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="./rust_watchdog.json")
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--version", action="store_true", help="print version and exit")
     args = ap.parse_args()
+
+    if args.version:
+        print(__version__)
+        return
 
     cfg = load_cfg(args.config)
     server_dir = os.path.abspath(cfg["server_dir"])
@@ -311,6 +370,10 @@ def main():
         os.makedirs(os.path.dirname(os.path.abspath(cfg["logfile"])), exist_ok=True)
         fp = open(cfg["logfile"], "a", encoding="utf-8")
 
+    # Clean shutdown behavior under systemd (SIGTERM) and Ctrl-C (SIGINT)
+    signal.signal(signal.SIGTERM, _request_stop)
+    signal.signal(signal.SIGINT, _request_stop)
+
     # Guard: don’t allow recovery from inside screen/tmux
     if inside_screen_or_tmux() and not cfg.get("dry_run", False):
         log("WARNING: running inside screen/tmux -> forcing dry_run=true (prevents tmuxception loops)", fp)
@@ -319,7 +382,7 @@ def main():
     if not acquire_lock(cfg["lockfile"], fp):
         sys.exit(1)
 
-    log(f"Watchdog started (dry_run={cfg['dry_run']})", fp)
+    log(f"Watchdog v{__version__} started (dry_run={cfg['dry_run']})", fp)
     log(f"server_dir={server_dir} identity={cfg['identity']}", fp)
     log(f"recovery_steps={cfg['recovery_steps']}", fp)
 
@@ -328,6 +391,10 @@ def main():
 
     try:
         while True:
+            if stop_requested:
+                log("Stop requested -- exiting watchdog loop", fp)
+                break
+
             pause_file = cfg.get("pause_file")
 
             if pause_file and os.path.exists(pause_file):
@@ -337,7 +404,7 @@ def main():
                     down_streak = 0  # optional: don't "resume" mid-DOWN streak                 
                 if args.once:
                     break
-                time.sleep(int(cfg["interval_seconds"]))
+                sleep_interruptible(int(cfg["interval_seconds"]))
                 continue
             else:
                 if paused:
@@ -359,6 +426,10 @@ def main():
             if state == "DOWN" and down_streak >= int(cfg["down_confirmations"]):
                 log("CONFIRMED DOWN -> recovery sequence", fp)
                 for step in cfg["recovery_steps"]:
+                    if stop_requested:
+                        log("Stop requested -- aborting recovery sequence", fp)
+                        break
+
                     step = step.strip().lower()
                     timeout = cfg["timeouts"].get(step, None)
                     try:
@@ -368,13 +439,18 @@ def main():
                     except Exception as e:
                         log(f"STEP ERROR ({step}): {e}", fp)
 
+                if stop_requested:
+                    log("Stop requested -- skipping cooldown and exiting", fp)
+                    break
+
                 log(f"Cooldown {cfg['cooldown_seconds']}s after recovery attempt", fp)
-                time.sleep(int(cfg["cooldown_seconds"]))
+                sleep_interruptible(int(cfg["cooldown_seconds"]))
                 down_streak = 0
+
             else:
                 if args.once:
                     break
-                time.sleep(int(cfg["interval_seconds"]))
+                sleep_interruptible(int(cfg["interval_seconds"]))
                 if args.once:
                     break
     finally:
