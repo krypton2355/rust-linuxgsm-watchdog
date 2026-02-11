@@ -1,8 +1,8 @@
 # rust-linuxgsm-watchdog
 
-A small, boring, stdlib-only watchdog for **[Rust (the game)](https://rust.facepunch.com/), i.e. for dedicated servers managed by LinuxGSM** to keep your server up, running and up to date in a more automated way than what [LinuxGSM](https://linuxgsm.com/) offers by default.
+A watchdog for **[Rust (the game)](https://rust.facepunch.com/), i.e. for dedicated servers managed by LinuxGSM** to keep your server up, running and up to date in a more automated way than what [LinuxGSM](https://linuxgsm.com/) offers by default.
 
-It polls server health and, if the server is *confirmed down*, runs a recovery sequence, i.e.:
+This program is stdlib-only by default. If you enable WebRCON features (tests / SmoothRestarter bridge), it uses `websocket-client`. It polls server health and, if the server is *confirmed down*, runs a recovery sequence, i.e.:
 
 1) `./rustserver update`  
 2) `./rustserver mu` (Oxide update via LinuxGSM mods)  
@@ -14,7 +14,8 @@ This is meant to complement workflows like uMod’s **[Smooth Restarter](https:/
 
 ## Why this exists
 
-- Some restart schedulers only know how to bring the server down.
+- Rust receives constant updates from [Facepunch](https://rust.facepunch.com/). Therefor it's important for the server to keep up to date constantly, with as little downtime and interruptions as possible.
+- Some restart schedulers only know how to bring the server down, but polling restarts with LinuxGSM is a whole different thing.
 - LinuxGSM already knows how to update server + mods + restart -- but it won’t automatically do it when some other plugin drops the server.
 - LinuxGSM runs Rust inside **tmux**. If you try to automate recovery from inside `screen` (or nested multiplexers), you’ll get tmuxception and everything gets stupid.
 
@@ -29,7 +30,7 @@ Health is decided by simple signals (no log parsing, no fragile regex soup):
 - **Process identity check (strong):**
   - `pgrep -af RustDedicated` must show `+server.identity <identity>`
 - **TCP connect check (medium):**
-  - TCP connect to the configured RCON port (default `127.0.0.1:28016`)
+  - TCP connect to the configured RCON port (default `127.0.0.1:28016`) to verify the port is reachable (not full WebRCON auth)
 
 If any RUNNING signal passes, the watchdog reports `RUNNING`.
 
@@ -43,7 +44,9 @@ Optional (disabled by default): `./rustserver details` parsing exists for debugg
 
 - Python 3.10+
 - A working LinuxGSM Rust install where `server_dir` contains an executable `./rustserver`
-- For the SmoothRestarter bridge: `tmux` must exist in PATH (LinuxGSM uses it anyway)
+
+Optional (only needed for WebRCON features like `--test-rcon-say` and the SmoothRestarter bridge):
+- `websocket-client` (install via `requirements.txt`)
 
 ---
 
@@ -105,6 +108,28 @@ First, clone the repo i.e. with:
 cd &&
 git clone https://github.com/FlyingFathead/rust-linuxgsm-watchdog &&
 cd rust-linuxgsm-watchdog
+
+# stdlib-only mode (no WebRCON features) -- nothing to install
+
+# OPTIONAL: enable WebRCON features (tests + SmoothRestarter bridge)
+python3 -m venv .venv
+./.venv/bin/python -m pip install -U pip
+./.venv/bin/python -m pip install -r requirements.txt
+```
+
+**(Option B to install the websocket if the venv isn't working out for you):**
+
+On Ubuntu/Debian tree Linux systems:
+
+```bash
+sudo apt update
+sudo apt install -y python3-websocket
+```
+
+On Fedora/RHEL:
+
+```bash
+sudo dnf install -y python3-websocket-client
 ```
 
 ### One-shot (manual test)
@@ -122,6 +147,19 @@ Run one loop iteration and exit:
 ```
 
 Do **not** run it inside `screen`/`tmux` if you want it to actually recover (LinuxGSM will tmuxception).
+
+### WebRCON test helpers
+
+Send a chat broadcast via WebRCON:
+
+```bash
+./rust_watchdog.py --config ./rust_watchdog.json --test-rcon-say "hello from watchdog"
+
+Send an arbitrary WebRCON command:
+
+```bash
+./rust_watchdog.py --config ./rust_watchdog.json --test-rcon-cmd "status"
+```
 
 ---
 
@@ -190,7 +228,7 @@ Bump `timeouts.update` / `timeouts.mu` if SteamCMD is slow, or keep them strict 
 If you use uMod’s **[Smooth Restarter](https://umod.org/plugins/smooth-restarter)** for player-visible countdown/UI, the watchdog can act as a bridge:
 
 * While `RUNNING`, watchdog periodically runs `./rustserver check-update` (LinuxGSM).
-* If an update is detected, watchdog sends a console command to SmoothRestarter via tmux:
+* If an update is detected, watchdog sends a console command to SmoothRestarter via **Rust WebRCON**:
   `srestart restart <delay>`
 * SmoothRestarter performs the graceful shutdown.
 * Once the server is `DOWN`, watchdog runs the normal recovery sequence:
@@ -238,8 +276,8 @@ If your layout is custom, override paths in `rust_watchdog.json`:
 When `enable_smoothrestarter_bridge=true`, the watchdog logs the expected SmoothRestarter paths on startup and prints the download URL if the plugin isn’t installed:
 [https://umod.org/plugins/smooth-restarter](https://umod.org/plugins/smooth-restarter)
 
-Note: the bridge sends the command via tmux (LinuxGSM runs the server in tmux),
-so run the watchdog outside tmux/screen (systemd recommended).
+Note: the bridge sends commands via Rust WebRCON (requires `websocket-client`).
+Run the watchdog outside tmux/screen (systemd recommended) so recovery isn’t blocked by nested multiplexers.
 
 ---
 

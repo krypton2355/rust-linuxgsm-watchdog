@@ -8,7 +8,11 @@ Type=simple
 User=rustserver
 Group=rustserver
 WorkingDirectory=/home/rustserver/rust-linuxgsm-watchdog
-ExecStart=/usr/bin/python3 /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.py --config /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.json
+
+# // alt method below for those not using the .venv
+# ExecStart=/usr/bin/python3 /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.py --config /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.json
+
+ExecStart=/home/rustserver/rust-linuxgsm-watchdog/.venv/bin/python /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.py --config /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.json
 Restart=always
 RestartSec=5
 KillMode=process
