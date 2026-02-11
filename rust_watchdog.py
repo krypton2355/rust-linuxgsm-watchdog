@@ -646,28 +646,21 @@ def run_cmd(cmd, cwd, fp=None, timeout=None, dry_run=False):
 def strip_ansi(s: str) -> str:
     return ANSI_RE.sub("", s or "")
 
-RCON_SAY_PRETTY_RE = re.compile(r'^\s*(global\.say|say)\s+"(.*)"\s*$', re.IGNORECASE)
+RCON_SAY_PRETTY_RE = re.compile(
+    r'^\s*(global\.say|say)\s+(?:"(.*)"|(.*))\s*$',
+    re.IGNORECASE
+)
 
 def pretty_rcon_cmd(cmd: str) -> str:
-    """
-    Make chat-y RCON commands readable in logs.
-
-    Examples:
-      global.say "hi"   -> global.say: hi
-      say "hi"          -> say: hi
-    """
     cmd = (cmd or "").strip()
     m = RCON_SAY_PRETTY_RE.match(cmd)
     if not m:
         return cmd
 
     verb = m.group(1)
-    msg = m.group(2)
+    msg = m.group(2) if m.group(2) is not None else (m.group(3) or "")
 
-    # Reverse the escaping done in rcon_global_say_cmd()
-    # (keep this conservative; we only undo what we do)
     msg = msg.replace("\\\\", "\\").replace('\\"', '"')
-
     return f"{verb}: {msg}"
 
 def run_cmd_capture(cmd, cwd, fp=None, timeout=None, dry_run=False):
@@ -1250,10 +1243,15 @@ def rcon_global_say_cmd(prefix: str, msg: str) -> str:
     msg = (msg or "").strip()
     full = f"{prefix} {msg}".strip() if prefix else msg
 
+    # If full is empty, Rust will show an empty SERVER message (or nothing useful).
+    if not full:
+        full = " "  # or return "" and treat as "don't send"
+
     # Escape backslashes + quotes for Rust console string
     full = full.replace("\\", "\\\\").replace('"', '\\"')
-    # Rust console quirk: add trailing char after closing quote so it doesn't get ignored
-    return f'global.say "{full}"\\'
+
+    # NO trailing backslash. Just send the command.
+    return f'global.say "{full}"'
 
 def test_smoothrestarter_bridge(cfg, server_dir, rustserver_path, fp=None, send=False):
     """
@@ -1314,7 +1312,7 @@ def test_smoothrestarter_bridge(cfg, server_dir, rustserver_path, fp=None, send=
         ok_r, resp = rcon_send(cfg, cmd, fp=fp)
         if ok_r:
             # resp is JSON-ish; don't spam, but keep *some* visibility
-            log(f"SMOOTH_TEST: RCON OK: {cmd}", fp)
+            log(f"SMOOTH_TEST: RCON OK: {cmd} -- resp={strip_ansi(resp).strip()}", fp)
             return True
         log(f"SMOOTH_TEST: RCON FAIL: {cmd} -- {resp}", fp)
         return False
