@@ -322,6 +322,8 @@ Run the watchdog outside tmux/screen (systemd recommended) so recovery isn’t b
 
 ### History
 - v0.2.6 - Implemented a standalone restart timer notification to the server when Smooth Restarter is not available and when we're watching for updates
+  - The watchdog is now calculating a countdown to Facepunch's forced wipe day (by default, the first Thursday of every month at 19:00 GMT); pending restarts over updates are on hold by default that day until we're past the expected update time.
+  - WIP: set wipe levels during forced wipe update-restarts.
 - v0.2.5 - Switched completely to RCON to interact with bridged Oxide plugins like Smooth Restarter
 - v0.2.4 - [Smooth Restarter](https://umod.org/plugins/smooth-restarter) bridge test (`--test-smoothrestarter` and `--test-smoothrestarter-send`)
 - v0.2.3 - initial support for bridging with [Smooth Restarter](https://umod.org/plugins/smooth-restarter)
