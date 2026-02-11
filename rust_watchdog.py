@@ -98,6 +98,9 @@ DEFAULTS = {
     # Rate-limit restart requests (avoid spamming SR during loops)
     "restart_request_cooldown_seconds": 3600,
 
+    # SmoothRestarter transport: RCON only (no tmux/screen injection)
+    "smoothrestarter_rcon_only": True,
+
     # Optional overrides (leave empty to use the default LinuxGSM layout)
     # If relative, they're resolved relative to server_dir.
     "smoothrestarter_config_path": "",
@@ -1039,16 +1042,13 @@ def request_smooth_restart(cfg, server_dir, rustserver_path, fp=None):
     """
     Ask SmoothRestarter to schedule a restart.
 
-    Priority order:
-      1) WebRCON (requires python dep: websocket-client)
-      2) tmux send-keys (LinuxGSM console)
-      3) screen stuff (fallback)
-
-    Returns True if we successfully sent the command via ANY backend.
+    RCON ONLY.
+    We do NOT inject via tmux/screen because LinuxGSM's tmux session is not a real interactive console
+    for Rust server commands in your setup (as established earlier).
     """
     ok, cfg_ok, cfg_path, plugin_path = smoothrestarter_available(server_dir, cfg)
     if not ok:
-        log(f"SMOOTH_BRIDGE: enabled but SmoothRestarter plugin not found: {plugin_path}", fp)
+        log(f"SMOOTH_BRIDGE: SmoothRestarter plugin not found: {plugin_path}", fp)
         return False
     if not cfg_ok:
         log(f"SMOOTH_BRIDGE: NOTE: SmoothRestarter config missing (may be first run): {cfg_path}", fp)
@@ -1057,59 +1057,17 @@ def request_smooth_restart(cfg, server_dir, rustserver_path, fp=None):
     template = (cfg.get("smoothrestarter_console_cmd") or "srestart restart {delay}").strip()
     cmd = template.format(delay=delay) if "{delay}" in template else f"{template} {delay}"
 
-    # ---------------------------------------------------------
-    # 1) Try WebRCON first (optional dependency: websocket-client)
-    # ---------------------------------------------------------
     ok_ws, ws_err = websocket_dep_status()
     if not ok_ws:
-        log(
-            f"SMOOTH_BRIDGE: couldn't load websocket-client ({ws_err}) -- "
-            f"RCON bridge disabled; falling back to tmux/screen",
-            fp
-        )
-    else:
-        ok_r, resp = rcon_send(cfg, cmd, fp=fp)
-        if ok_r:
-            log(f"SMOOTH_BRIDGE: RCON OK: {strip_ansi(resp).strip()}", fp)
-            return True
-        log(f"SMOOTH_BRIDGE: RCON failed: {resp} -- falling back to tmux/screen", fp)
+        log(f"SMOOTH_BRIDGE: FAIL: websocket-client missing ({ws_err}) -- cannot use RCON", fp)
+        return False
 
-    # ---------------------------------------------------------
-    # 2) Try tmux (LinuxGSM console)
-    # ---------------------------------------------------------
-    l_name, prefer_session = detect_lgsm_tmux_context(cfg, fp=fp)
+    ok_r, resp = rcon_send(cfg, cmd, fp=fp)
+    if ok_r:
+        log(f"SMOOTH_BRIDGE: RCON OK: {strip_ansi(resp).strip()}", fp)
+        return True
 
-    t_sessions = tmux_list_sessions(l_name)
-    t_target = (
-        choose_tmux_target(
-            cfg, rustserver_path,
-            l_name=l_name,
-            prefer_session=prefer_session
-        )
-        if t_sessions is not None else None
-    )
-
-    if t_target:
-        ok_t = tmux_send_line(
-            t_target, cmd,
-            fp=fp,
-            dry_run=cfg.get("dry_run", False),
-            l_name=l_name
-        )
-        if ok_t:
-            return True
-
-    # ---------------------------------------------------------
-    # 3) Fallback to screen
-    # ---------------------------------------------------------
-    s_sessions = screen_list_sessions()
-    s_target = choose_screen_target(cfg, rustserver_path) if s_sessions is not None else None
-    if s_target:
-        ok_s = screen_send_line(s_target, cmd, fp=fp, dry_run=cfg.get("dry_run", False))
-        if ok_s:
-            return True
-
-    log(f"SMOOTH_BRIDGE: no console session found / send failed. tmux={t_sessions} screen={s_sessions}", fp)
+    log(f"SMOOTH_BRIDGE: RCON FAIL: {resp}", fp)
     return False
 
 def check_server_update_via_lgsm(cfg, server_dir, rustserver_path, fp=None):
@@ -1255,16 +1213,26 @@ def rust_console_say(prefix: str, msg: str) -> str:
         return f"say {prefix} {msg}"
     return f"say {msg}"
 
+def rcon_global_say_cmd(prefix: str, msg: str) -> str:
+    """
+    Build a Rust WebRCON chat broadcast command: global.say "..."
+    """
+    prefix = (prefix or "").strip()
+    msg = (msg or "").strip()
+    full = f"{prefix} {msg}".strip() if prefix else msg
+
+    # Escape backslashes + quotes for Rust console string
+    full = full.replace("\\", "\\\\").replace('"', '\\"')
+    return f'global.say "{full}"'
+
 def test_smoothrestarter_bridge(cfg, server_dir, rustserver_path, fp=None, send=False):
+    """
+    RCON-only SmoothRestarter ceremony test.
+    No tmux/screen injection.
+    """
     ok, cfg_ok, sr_cfg, sr_plugin = smoothrestarter_available(server_dir, cfg)
     log(f"SMOOTH_TEST: plugin path: {sr_plugin}", fp)
     log(f"SMOOTH_TEST: config path: {sr_cfg}", fp)
-
-    ok_ws, ws_err = websocket_dep_status()
-    if not ok_ws:
-        log(f"SMOOTH_TEST: websocket-client missing ({ws_err}) -- RCON path unavailable", fp)
-    else:
-        log("SMOOTH_TEST: websocket-client OK -- RCON path available", fp)
 
     if not ok:
         log(f"SMOOTH_TEST: FAIL: SmoothRestarter plugin missing. Get it from: {SMOOTHRESTARTER_URL}", fp)
@@ -1273,36 +1241,18 @@ def test_smoothrestarter_bridge(cfg, server_dir, rustserver_path, fp=None, send=
     if not cfg_ok:
         log(f"SMOOTH_TEST: NOTE: SmoothRestarter config missing (may be first run): {sr_cfg}", fp)
 
-    # Detect LinuxGSM tmux socket/session (tmux -L <name> ... -s <session>)
-    l_name, prefer_session = detect_lgsm_tmux_context(cfg, fp=fp)
-    if l_name:
-        log(f"SMOOTH_TEST: detected LinuxGSM tmux server (-L): {l_name}", fp)
-    if prefer_session:
-        log(f"SMOOTH_TEST: detected LinuxGSM tmux session (-s): {prefer_session}", fp)
-
-    t_sessions = tmux_list_sessions(l_name)
-    s_sessions = screen_list_sessions()
-    log(f"SMOOTH_TEST: tmux sessions: {t_sessions}", fp)
-    log(f"SMOOTH_TEST: screen sessions: {s_sessions}", fp)
-
-    backend = None
-    target = None
-
-    if t_sessions is not None:
-        target = choose_tmux_target(cfg, rustserver_path, l_name=l_name, prefer_session=prefer_session)
-        if target:
-            backend = "tmux"
-
-    if not target and s_sessions is not None:
-        target = choose_screen_target(cfg, rustserver_path)
-        if target:
-            backend = "screen"
-
-    if not target:
-        log("SMOOTH_TEST: FAIL: could not pick a console target session (tmux/screen)", fp)
+    ok_ws, ws_err = websocket_dep_status()
+    if not ok_ws:
+        log(f"SMOOTH_TEST: FAIL: websocket-client missing ({ws_err}) -- RCON path unavailable", fp)
         return 2
 
-    log(f"SMOOTH_TEST: chosen backend: {backend} target: {target}", fp)
+    # Verify we can autodetect WebRCON endpoint for this identity
+    ip, port, pw = detect_rcon_from_identity(cfg)
+    if not (ip and port and pw):
+        log("SMOOTH_TEST: FAIL: RCON autodetect failed (missing ip/port/password in RustDedicated cmdline)", fp)
+        return 2
+
+    log(f"SMOOTH_TEST: RCON autodetect OK: ws://{ip}:{port}/<password>", fp)
 
     # ---- ceremony commands ----
     prefix = smoothrestarter_cmd_prefix(cfg)
@@ -1315,8 +1265,8 @@ def test_smoothrestarter_bridge(cfg, server_dir, rustserver_path, fp=None, send=
     status_cmd = f"{prefix} status"
     cancel_cmd = f"{prefix} cancel"
 
-    log("SMOOTH_TEST: ceremony plan:", fp)
-    log("  announce: dry-run start", fp)
+    log("SMOOTH_TEST: ceremony plan (RCON only):", fp)
+    log("  announce: dry-run start (global.say)", fp)
     if want_status:
         log(f"  send: {status_cmd}", fp)
     log(f"  send: {restart_cmd}", fp)
@@ -1324,52 +1274,51 @@ def test_smoothrestarter_bridge(cfg, server_dir, rustserver_path, fp=None, send=
     log(f"  send: {cancel_cmd}", fp)
     if want_status:
         log(f"  send: {status_cmd}", fp)
-    log("  announce: test over", fp)
+    log("  announce: test over (global.say)", fp)
 
     if not send:
         log("SMOOTH_TEST: OK: wiring looks good (dry test; not sending anything)", fp)
         return 0
 
-    log("SMOOTH_TEST: SENDING ceremony (countdown will be started, then cancelled)", fp)
+    def rcon_line(cmd: str) -> bool:
+        ok_r, resp = rcon_send(cfg, cmd, fp=fp)
+        if ok_r:
+            # resp is JSON-ish; don't spam, but keep *some* visibility
+            log(f"SMOOTH_TEST: RCON OK: {cmd}", fp)
+            return True
+        log(f"SMOOTH_TEST: RCON FAIL: {cmd} -- {resp}", fp)
+        return False
 
-    def send_line(line: str) -> bool:
-        return send_console_line_via_backend(
-            backend, target, line,
-            fp=fp,
-            l_name=l_name,
-            dry_run=False
-        )
+    log("SMOOTH_TEST: SENDING ceremony via RCON (countdown will be started, then cancelled)", fp)
 
-    # 1) announce start (console "say", no RCON dependency)
-    if not send_line(rust_console_say(chat_prefix, "SmoothRestarter bridge DRY-RUN test starting -- server is NOT restarting.")):
-        log("SMOOTH_TEST: FAIL: could not announce start via console", fp)
+    # 1) announce start
+    if not rcon_line(rcon_global_say_cmd(chat_prefix, "SmoothRestarter bridge DRY-RUN test starting -- server is NOT restarting.")):
         return 2
 
     # 2) optional status
     if want_status:
-        send_line(status_cmd)
+        rcon_line(status_cmd)
 
     # 3) start countdown
-    if not send_line(restart_cmd):
-        log("SMOOTH_TEST: FAIL: could not send restart command", fp)
+    if not rcon_line(restart_cmd):
         return 2
 
-    # 4) wait a bit so you can SEE the countdown/UI/chat ticks
+    # 4) wait a bit
     time.sleep(max(0, cancel_after))
 
     # 5) cancel countdown
-    if not send_line(cancel_cmd):
-        log("SMOOTH_TEST: FAIL: could not send cancel command (countdown may still be active!)", fp)
+    if not rcon_line(cancel_cmd):
+        log("SMOOTH_TEST: FAIL: cancel failed (countdown may still be active!)", fp)
         return 2
 
     # 6) optional status
     if want_status:
-        send_line(status_cmd)
+        rcon_line(status_cmd)
 
     # 7) announce end
-    send_line(rust_console_say(chat_prefix, "SmoothRestarter bridge DRY-RUN test over -- countdown cancelled."))
+    rcon_line(rcon_global_say_cmd(chat_prefix, "SmoothRestarter bridge DRY-RUN test over -- countdown cancelled."))
 
-    log("SMOOTH_TEST: OK: ceremony complete", fp)
+    log("SMOOTH_TEST: OK: ceremony complete (RCON only)", fp)
     return 0
 
 def health_report(cfg, server_dir, rustserver_path, fp=None):
