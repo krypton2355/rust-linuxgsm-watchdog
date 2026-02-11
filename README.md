@@ -8,16 +8,17 @@ This program is stdlib-only by default. If you enable WebRCON features (tests / 
 2) `./rustserver mu` (Oxide update via LinuxGSM mods)  
 3) `./rustserver restart`
 
-This is meant to complement workflows like uMod’s **[Smooth Restarter](https://umod.org/plugins/smooth-restarter)** that can *stop the server gracefully* but don’t handle **update + mods + restart** on their own.
+This is meant to complement workflows like uMod’s **[Smooth Restarter](https://umod.org/plugins/smooth-restarter)** that can *stop the server gracefully* but don’t handle **Steam-end server update + mod updates + restart** on their own.
 
 ---
 
 ## Why this exists
 
-- Rust receives constant updates from [Facepunch](https://rust.facepunch.com/). Therefor it's important for the server to keep up to date constantly, with as little downtime and interruptions as possible.
-- Some restart schedulers only know how to bring the server down, but polling restarts with LinuxGSM is a whole different thing.
-- LinuxGSM already knows how to update server + mods + restart -- but it won’t automatically do it when some other plugin drops the server.
-- LinuxGSM runs Rust inside **tmux**. If you try to automate recovery from inside `screen` (or nested multiplexers), you’ll get tmuxception and everything gets stupid.
+- Rust receives constant updates from [Facepunch](https://rust.facepunch.com/) -- so keeping the server current with minimal downtime matters.
+- LinuxGSM already knows how to do the boring-but-correct sequence: **update server + update mods + restart**.
+- But LinuxGSM does not automatically run that sequence when the server goes down due to external reasons (crashes, plugin actions, etc).
+- Many “restart schedulers” can only stop the server. Coordinating **stop/update/mu/restart** reliably on LinuxGSM is a separate problem.
+- LinuxGSM runs Rust inside **tmux**. If you try to run recovery from inside `screen`/`tmux`, you’ll get tmuxception and everything gets stupid.
 
 So the watchdog is designed to run **outside** `screen`/`tmux` (ideally via `systemd`).
 
@@ -42,11 +43,11 @@ Optional (disabled by default): `./rustserver details` parsing exists for debugg
 
 ## Requirements / assumptions
 
-- Python 3.10+
+- Python 3.9+ (uses `zoneinfo`; install `tzdata` on minimal hosts if your timezone DB is missing)
 - A working LinuxGSM Rust install where `server_dir` contains an executable `./rustserver`
 
 Optional (only needed for WebRCON features like `--test-rcon-say` and the SmoothRestarter bridge):
-- `websocket-client` (install via `requirements.txt`)
+- `websocket-client` (install via `requirements.txt`, or `pip install websocket-client`) 
 
 ---
 
@@ -123,7 +124,7 @@ On Ubuntu/Debian tree Linux systems:
 
 ```bash
 sudo apt update
-sudo apt install -y python3-websocket
+sudo apt install -y python3-websocket || sudo apt install -y python3-websocket-client
 ```
 
 On Fedora/RHEL:
@@ -225,14 +226,45 @@ Bump `timeouts.update` / `timeouts.mu` if SteamCMD is slow, or keep them strict 
 
 ## Optional: SmoothRestarter bridge (graceful restarts)
 
-If you use uMod’s **[Smooth Restarter](https://umod.org/plugins/smooth-restarter)** for player-visible countdown/UI, the watchdog can act as a bridge:
+If you use uMod’s **[Smooth Restarter](https://umod.org/plugins/smooth-restarter)** for player-visible countdown/UI, the watchdog can act as a bridge **while the server is RUNNING**:
 
-* While `RUNNING`, watchdog periodically runs `./rustserver check-update` (LinuxGSM).
-* If an update is detected, watchdog sends a console command to SmoothRestarter via **Rust WebRCON**:
-  `srestart restart <delay>`
-* SmoothRestarter performs the graceful shutdown.
-* Once the server is `DOWN`, watchdog runs the normal recovery sequence:
-  `update` -> `mu` -> `restart`
+1. Watchdog periodically runs `./rustserver check-update` (or `./rustserver cu`) via LinuxGSM.
+2. If an update is detected, watchdog **always broadcasts**:
+   - `update_watch_announce_message` (default: "Update detected -- restart incoming.")
+3. Then it chooses one of two paths:
+
+### Path A -- SmoothRestarter countdown (preferred)
+
+If SmoothRestarter bridging is enabled and usable, watchdog sends (via **Rust WebRCON**) the configured command:
+- `smoothrestarter_console_cmd` (default: `srestart restart {delay}`)
+
+Even when using SmoothRestarter’s own countdown/UI, watchdog also sends **one** informational line using:
+- `update_watch_countdown_template` (example: "Time until server update and restart: {seconds} seconds.")
+
+And it also sends the final fallback message once:
+- `update_watch_final_message` (default: "Server is restarting, come back in a few minutes!")
+
+SmoothRestarter then performs the graceful shutdown. Once the server is down, LinuxGSM restart/update happens on the next normal watchdog recovery cycle.
+
+### Path B -- No SmoothRestarter (or bridge failed)
+
+If SmoothRestarter is disabled OR the bridge fails at runtime, watchdog does a crude countdown itself:
+- broadcasts `update_watch_countdown_template` every `update_watch_no_sr_tick_seconds`
+- for `update_watch_no_sr_countdown_seconds` total
+- then broadcasts `update_watch_final_message`
+- then runs the immediate sequence:
+  `./rustserver stop` -> `./rustserver update` -> `./rustserver mu` -> `./rustserver restart`
+
+### What “SR check” means in this project
+
+There are three different ideas people confuse:
+
+- **Bridge enabled:** `enable_smoothrestarter_bridge=true` (note: bridge only triggers if `enable_update_watch=true`)
+- **SmoothRestarter installed:** plugin file exists:
+  `{server_dir}/serverfiles/oxide/plugins/SmoothRestarter.cs`
+- **Bridge usable right now:** `websocket-client` is available and WebRCON autodetect works (find `+rcon.ip/+rcon.port/+rcon.password` from the RustDedicated cmdline for this identity), and the RCON send succeeds.
+
+If “usable” fails, watchdog logs why and falls back to Path B.
 
 Enable in `rust_watchdog.json`:
 
@@ -245,6 +277,13 @@ Enable in `rust_watchdog.json`:
   "enable_smoothrestarter_bridge": true,
   "smoothrestarter_restart_delay_seconds": 300,
   "smoothrestarter_console_cmd": "srestart restart {delay}",
+
+  "update_watch_announce_message": "Update detected -- restart incoming.",
+  "update_watch_countdown_template": "Time until server update and restart: {seconds} seconds.",
+  "update_watch_final_message": "Server is restarting, come back in a few minutes!",
+
+  "update_watch_no_sr_countdown_seconds": 30,
+  "update_watch_no_sr_tick_seconds": 10,
 
   "restart_request_cooldown_seconds": 3600
 }
@@ -282,6 +321,7 @@ Run the watchdog outside tmux/screen (systemd recommended) so recovery isn’t b
 ---
 
 ### History
+- v0.2.6 - Implemented a standalone restart timer notification to the server when Smooth Restarter is not available and when we're watching for updates
 - v0.2.5 - Switched completely to RCON to interact with bridged Oxide plugins like Smooth Restarter
 - v0.2.4 - [Smooth Restarter](https://umod.org/plugins/smooth-restarter) bridge test (`--test-smoothrestarter` and `--test-smoothrestarter-send`)
 - v0.2.3 - initial support for bridging with [Smooth Restarter](https://umod.org/plugins/smooth-restarter)

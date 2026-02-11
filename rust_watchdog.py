@@ -30,7 +30,7 @@ except Exception:
     ZoneInfo = None  # type: ignore
     ZoneInfoNotFoundError = Exception  # type: ignore
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 SMOOTHRESTARTER_URL = "https://umod.org/plugins/smooth-restarter"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -154,10 +154,35 @@ DEFAULTS = {
     # Rate-limit restart requests (avoid spamming SR during loops)
     "restart_request_cooldown_seconds": 3600,
 
+    # ---------------------------------------------------------
+    # Update-watch announcements + fallback countdown (no SR)
+    # [SR = Smooth Restarter]
+    #
+    # Rule:
+    # - If SR is enabled OR not, we still announce "reboot incoming".
+    # - If SR is NOT enabled/working -> we do a crude countdown ourselves:
+    #     "Time until server update and restart: xx seconds."
+    #   then:
+    #     "Server is restarting, come back in a few minutes!"
+    # ---------------------------------------------------------
+    "update_watch_announce_message":
+        "Update detected -- restart incoming.",
+
+    "update_watch_countdown_template":
+        "Time until server update and restart: {seconds} seconds.",
+
+    "update_watch_final_message":
+        "Server is restarting, come back in a few minutes!",
+
+    # No-SR countdown behavior (only used when SR bridge is disabled OR fails)
+    "update_watch_no_sr_countdown_seconds": 30,
+    "update_watch_no_sr_tick_seconds": 10,
+
     # Optional overrides (leave empty to use the default LinuxGSM layout)
     # If relative, they're resolved relative to server_dir.
     "smoothrestarter_config_path": "",
     "smoothrestarter_plugin_path": "",
+
 }
 
 STATUS_RE = re.compile(r"^\s*Status:\s*(\S+)\s*$", re.IGNORECASE)
@@ -1594,6 +1619,111 @@ def rcon_say_cmd(prefix: str, msg: str) -> str:
     full = sanitize_rust_console_text(full)
     return f"say {full}"
 
+def best_effort_rcon_say(cfg, msg: str, fp=None) -> bool:
+    """
+    Best-effort: try to say something over RCON.
+    If the server is stuck, this will fail and we just continue anyway.
+    Never raises.
+    """
+    msg = (msg or "").strip()
+    if not msg:
+        return False
+
+    try:
+        if parse_bool(cfg.get("dry_run"), False):
+            log(f"DRY_RUN: would RCON say: {msg}", fp)
+            return True
+
+        ok, resp = rcon_send(cfg, rcon_say_cmd("", msg), fp=fp)
+        # Keep the response short-ish in logs:
+        if ok:
+            log(f"RCON_SAY: OK -- {strip_ansi(resp).strip()[:200]}", fp)
+        else:
+            log(f"RCON_SAY: FAIL -- {resp}", fp)
+        return bool(ok)
+    except Exception as e:
+        log(f"RCON_SAY: FAIL -- {e}", fp)
+        return False
+
+def update_watch_no_sr_countdown(cfg, fp=None):
+    """
+    Rudimentary countdown (no SR):
+      "Time until server update and restart: xx seconds."
+    """
+    total = int(cfg.get("update_watch_no_sr_countdown_seconds", 30))
+    tick = int(cfg.get("update_watch_no_sr_tick_seconds", 10))
+    if total <= 0 or tick <= 0:
+        return
+
+    tmpl = str(cfg.get(
+        "update_watch_countdown_template",
+        "Time until server update and restart: {seconds} seconds."
+    ))
+
+    # DRY_RUN: don't actually wait; just log the intended announcements.
+    if parse_bool(cfg.get("dry_run"), False):
+        for s in range(total, 0, -tick):
+            try:
+                best_effort_rcon_say(cfg, tmpl.format(seconds=s), fp=fp)
+            except Exception:
+                best_effort_rcon_say(cfg, f"Time until server update and restart: {s} seconds.", fp=fp)
+        return
+
+    remaining = total
+    while remaining > 0:
+        if stop_requested:
+            return
+        try:
+            msg = tmpl.format(seconds=remaining)
+        except Exception:
+            msg = f"Time until server update and restart: {remaining} seconds."
+        best_effort_rcon_say(cfg, msg, fp=fp)
+
+        sleep_interruptible(min(tick, remaining))
+        remaining -= tick
+
+def update_watch_fallback_restart_now(cfg, server_dir, rustserver_path, fp=None):
+    """
+    No-SR path (or SR failed):
+      - announce (best-effort)
+      - crude countdown
+      - final message
+      - stop + update + mu + restart
+    """
+    # Announce (best-effort)
+    best_effort_rcon_say(cfg, str(cfg.get("update_watch_announce_message", "")).strip(), fp=fp)
+
+    # Countdown
+    update_watch_no_sr_countdown(cfg, fp=fp)
+
+    # Final message (best-effort)
+    best_effort_rcon_say(cfg, str(cfg.get("update_watch_final_message", "")).strip(), fp=fp)
+
+    # Now do the actual sequence
+    steps = ["stop"] + list(cfg.get("recovery_steps", ["update", "mu", "restart"]))
+
+    for step in steps:
+        if stop_requested:
+            log("Stop requested -- aborting update-watch fallback restart", fp)
+            return
+
+        s = (step or "").strip().lower()
+        if not s:
+            continue
+
+        timeout = None
+        try:
+            timeout = cfg.get("timeouts", {}).get(s, None)
+        except Exception:
+            timeout = None
+
+        try:
+            run_cmd([rustserver_path, s], server_dir, fp, timeout=timeout, dry_run=cfg["dry_run"])
+        except TimeoutError as e:
+            log(f"STEP TIMEOUT ({s}): {e}", fp)
+        except Exception as e:
+            log(f"STEP ERROR ({s}): {e}", fp)
+
 def test_smoothrestarter_bridge(cfg, server_dir, rustserver_path, fp=None, send=False):
     """
     RCON-only SmoothRestarter ceremony test.
@@ -1961,24 +2091,77 @@ def main():
                         else:
                             log("UPDATE_WATCH: update available", fp)
 
-                            if parse_bool(cfg.get("enable_smoothrestarter_bridge"), False):
-                                cooldown = int(cfg.get("restart_request_cooldown_seconds", 3600))
-                                if (now - last_restart_request) < cooldown:
-                                    left = int(cooldown - (now - last_restart_request))
-                                    log(f"SMOOTH_BRIDGE: restart request cooldown active ({left}s left) -- not requesting again", fp)
-                                else:
+                            cooldown = int(cfg.get("restart_request_cooldown_seconds", 3600))
+                            if (now - last_restart_request) < cooldown:
+                                left = int(cooldown - (now - last_restart_request))
+                                log(f"UPDATE_WATCH: restart cooldown active ({left}s left) -- not acting again yet", fp)
+                            else:
+                                # ---------------------------------------------------------
+                                # ALWAYS announce "reboot incoming", regardless of SR usage.
+                                # ---------------------------------------------------------
+                                best_effort_rcon_say(
+                                    cfg,
+                                    str(cfg.get("update_watch_announce_message", "")).strip(),
+                                    fp=fp
+                                )
+
+                                # If SR is enabled, SR will do the real countdown, but we still
+                                # emit the "time until..." line + the final reboot message once.
+                                if parse_bool(cfg.get("enable_smoothrestarter_bridge"), False):
+                                    sr_delay = int(cfg.get("smoothrestarter_restart_delay_seconds", 300))
+
+                                    # One-line "time until..." even when SR is used
+                                    try:
+                                        tmpl = str(cfg.get(
+                                            "update_watch_countdown_template",
+                                            "Time until server update and restart: {seconds} seconds."
+                                        ))
+                                        best_effort_rcon_say(cfg, tmpl.format(seconds=sr_delay), fp=fp)
+                                    except Exception:
+                                        best_effort_rcon_say(
+                                            cfg,
+                                            f"Time until server update and restart: {sr_delay} seconds.",
+                                            fp=fp
+                                        )
+
+                                    # And your required final message (best-effort)
+                                    best_effort_rcon_say(
+                                        cfg,
+                                        str(cfg.get("update_watch_final_message", "")).strip(),
+                                        fp=fp
+                                    )
+
                                     ok = request_smooth_restart(cfg, server_dir, rustserver_path, fp)
                                     if ok:
                                         last_restart_request = now
                                         log(
                                             f"SMOOTH_BRIDGE: requested SmoothRestarter restart "
-                                            f"(delay={int(cfg.get('smoothrestarter_restart_delay_seconds', 300))}s)",
+                                            f"(delay={sr_delay}s)",
                                             fp
                                         )
                                     else:
-                                        log("SMOOTH_BRIDGE: failed to request SmoothRestarter restart", fp)
-                            else:
-                                log("UPDATE_WATCH: SmoothRestarter bridge disabled; no graceful restart requested", fp)
+                                        log("SMOOTH_BRIDGE: failed -> falling back to no-SR countdown + restart NOW", fp)
+                                        update_watch_fallback_restart_now(cfg, server_dir, rustserver_path, fp=fp)
+
+                                        last_restart_request = now
+                                        down_streak = 0
+                                        log(f"Cooldown {cfg['cooldown_seconds']}s after update-watch fallback restart", fp)
+                                        sleep_interruptible(int(cfg["cooldown_seconds"]))
+                                        if args.once:
+                                            break
+                                        continue
+
+                                else:
+                                    # No SR: do crude countdown + stop/update/mu/restart immediately
+                                    update_watch_fallback_restart_now(cfg, server_dir, rustserver_path, fp=fp)
+
+                                    last_restart_request = now
+                                    down_streak = 0
+                                    log(f"Cooldown {cfg['cooldown_seconds']}s after update-watch fallback restart", fp)
+                                    sleep_interruptible(int(cfg["cooldown_seconds"]))
+                                    if args.once:
+                                        break
+                                    continue
 
                     elif verdict is False:
                         log("UPDATE_WATCH: no update available", fp)
