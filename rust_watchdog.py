@@ -75,18 +75,25 @@ DEFAULTS = {
     },
 
     # ---------------------------------------------------------
-    # Optional: watch for LinuxGSM server updates while RUNNING
-    # ---------------------------------------------------------
-    "enable_update_watch": False,
-    "update_check_interval_seconds": 600,
-    "update_check_timeout": 60,
-
-    # ---------------------------------------------------------
     # Optional: SmoothRestarter bridge
     # ---------------------------------------------------------
     "enable_smoothrestarter_bridge": False,
     "smoothrestarter_restart_delay_seconds": 300,
     "smoothrestarter_console_cmd": "srestart restart {delay}",
+
+    # ---------------------------------------------------------
+    # SmoothRestarter bridge TEST ceremony (safe dry-run)
+    # ---------------------------------------------------------
+    # For --test-smoothrestarter-send:
+    #   -- announce "dry run"
+    #   -- start a short SR countdown
+    #   -- wait a few seconds
+    #   -- cancel it
+    #   -- announce "test over"
+    "smoothrestarter_test_delay_seconds": 120,
+    "smoothrestarter_test_cancel_after_seconds": 8,
+    "smoothrestarter_test_send_status": True,
+    "smoothrestarter_test_chat_prefix": "[Rust Watchdog]",
 
     # Rate-limit restart requests (avoid spamming SR during loops)
     "restart_request_cooldown_seconds": 3600,
@@ -1196,12 +1203,57 @@ def check_lgsm_details(server_dir, rustserver_path, timeout_s):
 def inside_screen_or_tmux():
     return bool(os.environ.get("STY")) or bool(os.environ.get("TMUX"))
 
-def build_smoothrestarter_cmd(cfg):
-    delay = int(cfg.get("smoothrestarter_restart_delay_seconds", 300))
+def smoothrestarter_cmd_prefix(cfg):
+    """
+    Extract the command prefix token used to invoke SmoothRestarter.
+
+    Examples:
+      smoothrestarter_console_cmd = "sr restart {delay}"      -> prefix "sr"
+      smoothrestarter_console_cmd = "srestart restart {delay}" -> prefix "srestart"
+    """
+    template = (cfg.get("smoothrestarter_console_cmd") or "srestart restart {delay}").strip()
+    try:
+        toks = shlex.split(template)
+    except Exception:
+        toks = template.split()
+    if toks:
+        return toks[0]
+    return "srestart"
+
+def build_smoothrestarter_restart_cmd(cfg, delay_seconds: int):
+    """
+    Build the configured SmoothRestarter restart command, but with a caller-supplied delay.
+    """
+    delay = int(delay_seconds)
     template = (cfg.get("smoothrestarter_console_cmd") or "srestart restart {delay}").strip()
     if "{delay}" in template:
         return template.format(delay=delay)
     return f"{template} {delay}"
+
+def send_console_line_via_backend(backend, target, line, *, fp=None, l_name=None, dry_run=False):
+    """
+    Send a single console line via the selected backend.
+    backend: "tmux" or "screen"
+    """
+    if backend == "tmux":
+        return tmux_send_line(target, line, fp=fp, dry_run=dry_run, l_name=l_name)
+    if backend == "screen":
+        return screen_send_line(target, line, fp=fp, dry_run=dry_run)
+    log(f"SMOOTH_TEST: invalid backend: {backend}", fp)
+    return False
+
+def rust_console_say(prefix: str, msg: str) -> str:
+    """
+    Server console broadcast.
+
+    We use server console "say ..." because this works via tmux/screen injection
+    and does NOT depend on WebRCON/websocket-client autodetect.
+    """
+    prefix = (prefix or "").strip()
+    msg = (msg or "").strip()
+    if prefix:
+        return f"say {prefix} {msg}"
+    return f"say {msg}"
 
 def test_smoothrestarter_bridge(cfg, server_dir, rustserver_path, fp=None, send=False):
     ok, cfg_ok, sr_cfg, sr_plugin = smoothrestarter_available(server_dir, cfg)
@@ -1252,38 +1304,72 @@ def test_smoothrestarter_bridge(cfg, server_dir, rustserver_path, fp=None, send=
 
     log(f"SMOOTH_TEST: chosen backend: {backend} target: {target}", fp)
 
-    cmd = build_smoothrestarter_cmd(cfg)
-    log(f"SMOOTH_TEST: would send: {cmd}", fp)
+    # ---- ceremony commands ----
+    prefix = smoothrestarter_cmd_prefix(cfg)
+    test_delay = int(cfg.get("smoothrestarter_test_delay_seconds", 120))
+    cancel_after = int(cfg.get("smoothrestarter_test_cancel_after_seconds", 8))
+    want_status = parse_bool(cfg.get("smoothrestarter_test_send_status", True), True)
+    chat_prefix = (cfg.get("smoothrestarter_test_chat_prefix") or "[Rust Watchdog]").strip()
 
-    # Optional: announce bridge test in-game so you can SEE it's this test.
-    # (Uses RCON, so only works if websocket-client is available and autodetect succeeds.)
-    if ok_ws:
-        prefix = "[Rust Watchdog] SMOOTH_TEST:"
-        chat = f'{prefix} backend={backend} target={target} cmd="{cmd}"'
-        chat_escaped = chat.replace('"', '\\"')
+    restart_cmd = build_smoothrestarter_restart_cmd(cfg, test_delay)
+    status_cmd = f"{prefix} status"
+    cancel_cmd = f"{prefix} cancel"
 
-        ok_a, resp_a = rcon_send(cfg, f'global.say "{chat_escaped}"', fp=fp)
-        if ok_a:
-            log("SMOOTH_TEST: announced in chat via RCON", fp)
-        else:
-            log(f"SMOOTH_TEST: could not announce in chat via RCON: {resp_a}", fp)
-    else:
-        log("SMOOTH_TEST: no chat announce (websocket-client missing -> RCON unavailable)", fp)
+    log("SMOOTH_TEST: ceremony plan:", fp)
+    log("  announce: dry-run start", fp)
+    if want_status:
+        log(f"  send: {status_cmd}", fp)
+    log(f"  send: {restart_cmd}", fp)
+    log(f"  wait: {cancel_after}s", fp)
+    log(f"  send: {cancel_cmd}", fp)
+    if want_status:
+        log(f"  send: {status_cmd}", fp)
+    log("  announce: test over", fp)
 
-    if send:
-        log("SMOOTH_TEST: SENDING command (this may start a restart countdown!)", fp)
-        if backend == "tmux":
-            ok_send = tmux_send_line(target, cmd, fp=fp, dry_run=False, l_name=l_name)
-        else:
-            ok_send = screen_send_line(target, cmd, fp=fp, dry_run=False)
+    if not send:
+        log("SMOOTH_TEST: OK: wiring looks good (dry test; not sending anything)", fp)
+        return 0
 
-        if not ok_send:
-            log(f"SMOOTH_TEST: FAIL: {backend} send failed", fp)
-            return 2
-        log("SMOOTH_TEST: OK: command sent", fp)
-    else:
-        log("SMOOTH_TEST: OK: wiring looks good (dry test)", fp)
+    log("SMOOTH_TEST: SENDING ceremony (countdown will be started, then cancelled)", fp)
 
+    def send_line(line: str) -> bool:
+        return send_console_line_via_backend(
+            backend, target, line,
+            fp=fp,
+            l_name=l_name,
+            dry_run=False
+        )
+
+    # 1) announce start (console "say", no RCON dependency)
+    if not send_line(rust_console_say(chat_prefix, "SmoothRestarter bridge DRY-RUN test starting -- server is NOT restarting.")):
+        log("SMOOTH_TEST: FAIL: could not announce start via console", fp)
+        return 2
+
+    # 2) optional status
+    if want_status:
+        send_line(status_cmd)
+
+    # 3) start countdown
+    if not send_line(restart_cmd):
+        log("SMOOTH_TEST: FAIL: could not send restart command", fp)
+        return 2
+
+    # 4) wait a bit so you can SEE the countdown/UI/chat ticks
+    time.sleep(max(0, cancel_after))
+
+    # 5) cancel countdown
+    if not send_line(cancel_cmd):
+        log("SMOOTH_TEST: FAIL: could not send cancel command (countdown may still be active!)", fp)
+        return 2
+
+    # 6) optional status
+    if want_status:
+        send_line(status_cmd)
+
+    # 7) announce end
+    send_line(rust_console_say(chat_prefix, "SmoothRestarter bridge DRY-RUN test over -- countdown cancelled."))
+
+    log("SMOOTH_TEST: OK: ceremony complete", fp)
     return 0
 
 def health_report(cfg, server_dir, rustserver_path, fp=None):
