@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # rust_watchdog_alerts.py -- external notifications for rust-linuxgsm-watchdog (stdlib-only)
+
 import json
 import os
 import queue
 import threading
 import time
 import hashlib
+import socket
+import html
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from urllib.request import Request, urlopen
@@ -13,16 +16,27 @@ from urllib.error import URLError, HTTPError
 
 TELEGRAM_LIMIT = 4096
 
+
 def _now() -> float:
     return time.time()
 
+
 def _sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8", errors="replace")).hexdigest()
+
 
 def _split_telegram(msg: str) -> List[str]:
     if len(msg) <= TELEGRAM_LIMIT:
         return [msg]
     return [msg[i:i + TELEGRAM_LIMIT] for i in range(0, len(msg), TELEGRAM_LIMIT)]
+
+
+def _hostname() -> str:
+    try:
+        return socket.gethostname()
+    except Exception:
+        return "unknown-host"
+
 
 @dataclass
 class Alert:
@@ -33,10 +47,13 @@ class Alert:
     fields: Dict[str, Any]
     ts: float
 
+
 class Backend:
     name = "backend"
+
     def send(self, alert: Alert, rendered: str) -> bool:
         raise NotImplementedError
+
 
 class TelegramBackend(Backend):
     name = "telegram"
@@ -75,7 +92,9 @@ class TelegramBackend(Backend):
                         _ = resp.read()
                 except (HTTPError, URLError, TimeoutError, OSError):
                     ok_all = False
+
         return ok_all
+
 
 class DiscordWebhookBackend(Backend):
     name = "discord"
@@ -95,12 +114,15 @@ class DiscordWebhookBackend(Backend):
         except (HTTPError, URLError, TimeoutError, OSError):
             return False
 
+
 class AlertManager:
     """
     - Never throws from emit()
     - Queue + worker thread (network never blocks watchdog loop)
     - cooldown per event + dedupe by rendered message hash
     - persists state to disk
+
+    Config lives under cfg["alerts"].
     """
 
     def __init__(
@@ -108,16 +130,19 @@ class AlertManager:
         cfg: Dict[str, Any],
         state_path: str = "data/state/alerts_state.json",
         max_queue: int = 200,
-        log_fn=None,  # optional: function(level:str, msg:str)
+        log_fn=None,  # callable(level:str, msg:str)
     ):
-        self.cfg = cfg.get("alerts", {}) if isinstance(cfg, dict) else {}
-        self.enabled = bool(self.cfg.get("enabled", False))
+        self.root_cfg = cfg if isinstance(cfg, dict) else {}
+        self.cfg = self.root_cfg.get("alerts", {}) if isinstance(self.root_cfg.get("alerts", {}), dict) else {}
         self.log_fn = log_fn
-        self.state_path = state_path
+
+        self.enabled = bool(self.cfg.get("enabled", False))
+        self.state_path = str(self.cfg.get("state_path", state_path))
 
         self.cooldown_default = int(self.cfg.get("cooldown_seconds_default", 900))
         self.cooldowns = self.cfg.get("cooldowns", {}) or {}
         self.dedupe_seconds = int(self.cfg.get("dedupe_seconds", 300))
+
         self.include_host = bool(self.cfg.get("include_host", True))
         self.include_identity = bool(self.cfg.get("include_identity", True))
 
@@ -126,13 +151,18 @@ class AlertManager:
         self._worker = threading.Thread(target=self._run, name="alerts-worker", daemon=True)
 
         self._state_lock = threading.Lock()
-        self._state = {"last_event": {}, "last_key": {}, "suppressed": {}}
+        # schema:
+        #   last_event[event] = ts
+        #   last_key[event] = {"hash": str, "ts": float}
+        #   suppressed[event] = int
+        self._state: Dict[str, Any] = {"last_event": {}, "last_key": {}, "suppressed": {}}
         self._load_state()
 
         self.backends: List[Backend] = []
         if self.enabled:
             self._init_backends()
-            self._worker.start()
+            if self.enabled:
+                self._worker.start()
 
     def _log(self, level: str, msg: str) -> None:
         if self.log_fn:
@@ -146,9 +176,16 @@ class AlertManager:
             os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
             if os.path.exists(self.state_path):
                 with open(self.state_path, "r", encoding="utf-8") as f:
-                    self._state = json.load(f)
+                    obj = json.load(f)
+                if isinstance(obj, dict):
+                    self._state = obj
         except Exception:
             self._state = {"last_event": {}, "last_key": {}, "suppressed": {}}
+
+        # harden shape
+        for k in ("last_event", "last_key", "suppressed"):
+            if k not in self._state or not isinstance(self._state.get(k), dict):
+                self._state[k] = {}
 
     def _save_state(self) -> None:
         try:
@@ -167,23 +204,27 @@ class AlertManager:
         # Telegram
         if "telegram" in backends:
             tcfg = self.cfg.get("telegram", {}) or {}
-            token = os.getenv(tcfg.get("token_env", "RUST_WD_TELEGRAM_TOKEN"), "")
+            token = os.getenv(str(tcfg.get("token_env", "RUST_WD_TELEGRAM_TOKEN")), "")
             chat_ids = tcfg.get("chat_ids") or tcfg.get("chat_id")
             ids: List[int] = []
-            if isinstance(chat_ids, list):
-                ids = [int(x) for x in chat_ids]
-            elif isinstance(chat_ids, (str, int)):
-                # allow comma-separated string
-                if isinstance(chat_ids, str) and "," in chat_ids:
-                    ids = [int(x.strip()) for x in chat_ids.split(",") if x.strip()]
-                else:
-                    ids = [int(chat_ids)]
+
+            try:
+                if isinstance(chat_ids, list):
+                    ids = [int(x) for x in chat_ids]
+                elif isinstance(chat_ids, (str, int)):
+                    if isinstance(chat_ids, str) and "," in chat_ids:
+                        ids = [int(x.strip()) for x in chat_ids.split(",") if x.strip()]
+                    else:
+                        ids = [int(chat_ids)]
+            except Exception:
+                ids = []
+
             if token and ids:
                 self.backends.append(
                     TelegramBackend(
                         token=token,
                         chat_ids=ids,
-                        parse_mode=tcfg.get("parse_mode", "HTML"),
+                        parse_mode=str(tcfg.get("parse_mode", "HTML")),
                         disable_web_preview=bool(tcfg.get("disable_web_preview", True)),
                         timeout_s=int(tcfg.get("timeout_s", 8)),
                     )
@@ -192,16 +233,24 @@ class AlertManager:
         # Discord
         if "discord" in backends:
             dcfg = self.cfg.get("discord", {}) or {}
-            webhook = os.getenv(dcfg.get("webhook_env", "RUST_WD_DISCORD_WEBHOOK"), "")
+            webhook = os.getenv(str(dcfg.get("webhook_env", "RUST_WD_DISCORD_WEBHOOK")), "")
             if webhook:
                 self.backends.append(DiscordWebhookBackend(webhook_url=webhook, timeout_s=int(dcfg.get("timeout_s", 8))))
 
         if not self.backends:
-            self._log("WARN", "ALERTS: enabled, but no usable backends configured -> alerts disabled")
+            self._log("WARN", "enabled, but no usable backends configured -- disabling alerts")
             self.enabled = False
 
     def stop(self) -> None:
         self._stop.set()
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._worker.join(timeout=2.0)
+        except Exception:
+            pass
+        self._save_state()
 
     def emit(
         self,
@@ -213,90 +262,175 @@ class AlertManager:
     ) -> None:
         if not self.enabled:
             return
-        alert = Alert(event=event, level=level, title=title, text=text, fields=fields, ts=_now())
+        alert = Alert(
+            event=str(event or "event"),
+            level=str(level or "INFO"),
+            title=str(title or event or "event"),
+            text=str(text or ""),
+            fields=fields or {},
+            ts=_now(),
+        )
         try:
             self._q.put_nowait(alert)
         except queue.Full:
-            # drop non-critical spam; keep watchdog alive
-            if level in ("ERROR", "CRITICAL"):
-                self._log("WARN", f"ALERTS: queue full; dropped alert event={event} level={level}")
+            # drop spam; keep watchdog alive
+            if str(level).upper() in ("ERROR", "CRITICAL"):
+                self._log("WARN", f"queue full; dropped alert event={alert.event} level={alert.level}")
 
     def _cooldown_for(self, event: str) -> int:
-        v = self.cooldowns.get(event)
-        if v is None:
-            return self.cooldown_default
         try:
+            v = self.cooldowns.get(event)
+            if v is None:
+                return self.cooldown_default
             return int(v)
         except Exception:
             return self.cooldown_default
 
-    def _render(self, a: Alert) -> str:
-        host = os.uname().nodename if self.include_host else ""
-        identity = a.fields.get("identity", "") if self.include_identity else ""
-        head = f"[RustWatchdog]{'[' + identity + ']' if identity else ''}{'[' + host + ']' if host else ''} {a.level}: {a.title}"
-        lines = [head, a.text]
+    def _render_html(self, alert: Alert) -> str:
+        # Telegram HTML parse mode: escape everything we didn't author as markup.
+        ts_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(alert.ts))
+        parts: List[str] = []
 
-        # compact fields (no secrets)
-        safe = {}
-        for k, v in (a.fields or {}).items():
+        lvl = html.escape(alert.level)
+        title = html.escape(alert.title)
+        parts.append(f"<b>{lvl}</b> -- <b>{title}</b>")
+        parts.append(f"<code>{html.escape(ts_s)}</code>")
+
+        if self.include_host:
+            parts.append(f"<code>host={html.escape(_hostname())}</code>")
+
+        if self.include_identity:
+            ident = alert.fields.get("identity")
+            if ident:
+                parts.append(f"<code>identity={html.escape(str(ident))}</code>")
+
+        if alert.text.strip():
+            parts.append(html.escape(alert.text.strip()))
+
+        # Add a few structured fields (keep it short)
+        extras = []
+        for k, v in (alert.fields or {}).items():
+            if k in ("identity",):
+                continue
             if v is None:
                 continue
-            if "password" in k.lower() or "token" in k.lower():
+            s = str(v)
+            if len(s) > 200:
+                s = s[:200] + "..."
+            extras.append(f"{k}={s}")
+            if len(extras) >= 8:
+                break
+        if extras:
+            parts.append("<code>" + html.escape(" | ".join(extras)) + "</code>")
+
+        return "\n".join(parts)
+
+    def _render_plain(self, alert: Alert) -> str:
+        ts_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(alert.ts))
+        parts: List[str] = [f"{alert.level} -- {alert.title}", ts_s]
+
+        if self.include_host:
+            parts.append(f"host={_hostname()}")
+
+        if self.include_identity:
+            ident = alert.fields.get("identity")
+            if ident:
+                parts.append(f"identity={ident}")
+
+        if alert.text.strip():
+            parts.append(alert.text.strip())
+
+        extras = []
+        for k, v in (alert.fields or {}).items():
+            if k in ("identity",):
                 continue
-            safe[k] = v
-        if safe:
-            lines.append("fields: " + " ".join(f"{k}={safe[k]}" for k in sorted(safe.keys())))
-        return "\n".join(lines)
+            if v is None:
+                continue
+            s = str(v)
+            if len(s) > 200:
+                s = s[:200] + "..."
+            extras.append(f"{k}={s}")
+            if len(extras) >= 8:
+                break
+        if extras:
+            parts.append(" | ".join(extras))
 
-    def _should_send(self, a: Alert, rendered: str) -> bool:
-        now = _now()
-        key = f"{a.event}:{_sha1(rendered)}"
+        return "\n".join(parts)
+
+    def _render(self, alert: Alert) -> str:
+        # If Telegram backend uses HTML, render HTML; Discord gets plain.
+        # We render per-backend at send time, but dedupe should be stable -- use plain for dedupe key.
+        return self._render_plain(alert)
+
+    def _should_suppress(self, alert: Alert, rendered_key: str) -> bool:
+        event = alert.event
+        now = alert.ts
+        cooldown_s = self._cooldown_for(event)
 
         with self._state_lock:
-            last_evt = float(self._state.get("last_event", {}).get(a.event, 0) or 0)
-            last_key = float(self._state.get("last_key", {}).get(key, 0) or 0)
+            last_event = self._state.get("last_event", {}).get(event)
+            if isinstance(last_event, (int, float)) and cooldown_s > 0 and (now - float(last_event)) < cooldown_s:
+                self._state["suppressed"][event] = int(self._state["suppressed"].get(event, 0)) + 1
+                self._save_state()
+                return True
 
-            cd = self._cooldown_for(a.event)
-            if (now - last_evt) < cd:
-                self._state["suppressed"][a.event] = int(self._state.get("suppressed", {}).get(a.event, 0) or 0) + 1
-                return False
+            last_key_ent = self._state.get("last_key", {}).get(event)
+            if isinstance(last_key_ent, dict):
+                h = last_key_ent.get("hash")
+                ts0 = last_key_ent.get("ts")
+                if h == rendered_key and isinstance(ts0, (int, float)) and (now - float(ts0)) < self.dedupe_seconds:
+                    self._state["suppressed"][event] = int(self._state["suppressed"].get(event, 0)) + 1
+                    self._save_state()
+                    return True
 
-            if (now - last_key) < self.dedupe_seconds:
-                self._state["suppressed"][a.event] = int(self._state.get("suppressed", {}).get(a.event, 0) or 0) + 1
-                return False
+        return False
 
-            # tentatively allow; timestamps updated on successful send
-            return True
-
-    def _mark_sent(self, a: Alert, rendered: str) -> None:
-        now = _now()
-        key = f"{a.event}:{_sha1(rendered)}"
+    def _mark_sent(self, alert: Alert, rendered_key: str) -> None:
         with self._state_lock:
-            self._state.setdefault("last_event", {})[a.event] = now
-            self._state.setdefault("last_key", {})[key] = now
-            # reset suppression counter on real send
-            if a.event in self._state.get("suppressed", {}):
-                self._state["suppressed"][a.event] = 0
-        self._save_state()
+            self._state["last_event"][alert.event] = float(alert.ts)
+            self._state["last_key"][alert.event] = {"hash": rendered_key, "ts": float(alert.ts)}
+            self._save_state()
 
     def _run(self) -> None:
+        self._log("INFO", "worker started")
         while not self._stop.is_set():
             try:
-                a = self._q.get(timeout=0.5)
+                alert = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
 
-            rendered = self._render(a)
-            if not self._should_send(a, rendered):
-                continue
+            try:
+                # Dedupe key based on plain rendering (stable across backends)
+                key_plain = _sha1(self._render(alert))
 
-            ok_any = False
-            for b in self.backends:
+                if self._should_suppress(alert, key_plain):
+                    continue
+
+                ok_any = False
+                for b in self.backends:
+                    try:
+                        if isinstance(b, TelegramBackend) and b.parse_mode.upper() == "HTML":
+                            rendered = self._render_html(alert)
+                        else:
+                            rendered = self._render_plain(alert)
+                        ok = b.send(alert, rendered)
+                        ok_any = ok_any or bool(ok)
+                    except Exception as e:
+                        self._log("WARN", f"backend {getattr(b, 'name', '?')} error: {e}")
+
+                if ok_any:
+                    self._mark_sent(alert, key_plain)
+                else:
+                    # Don't mark sent if nothing worked -- allow retry next time.
+                    self._log("WARN", f"no backends succeeded for event={alert.event}")
+
+            except Exception as e:
+                self._log("WARN", f"handler error: {e}")
+            finally:
                 try:
-                    if b.send(a, rendered):
-                        ok_any = True
+                    self._q.task_done()
                 except Exception:
                     pass
 
-            if ok_any:
-                self._mark_sent(a, rendered)
+        self._log("INFO", "worker stopping")
+        self._save_state()

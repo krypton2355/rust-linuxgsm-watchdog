@@ -234,14 +234,19 @@ SR_NAME_RE = re.compile(r"\bsmooth\s*restarter\b", re.IGNORECASE)
 ALERTS = None
 
 def init_alerts(cfg, fp=None):
-    """
-    Initialize optional alert manager.
-    Never raises. Never breaks watchdog.
-    """
     global ALERTS
 
-    if not parse_bool(cfg.get("alerts_enabled"), False):
-        log("ALERTS: disabled (alerts_enabled=false)", fp)
+    enabled = False
+    try:
+        enabled = (
+            parse_bool(cfg.get("alerts_enabled"), False) or
+            parse_bool((cfg.get("alerts") or {}).get("enabled"), False)
+        )
+    except Exception:
+        enabled = False
+
+    if not enabled:
+        log("ALERTS: disabled", fp)
         return None
 
     try:
@@ -256,8 +261,11 @@ def init_alerts(cfg, fp=None):
         return None
 
     try:
-        # Prefer injection over stdlib logging wiring:
-        ALERTS = AlertManager(cfg, emit_log=lambda m: log(f"ALERTS: {m}", fp))
+        # log_fn(level, msg)
+        ALERTS = AlertManager(
+            cfg,
+            log_fn=lambda level, msg: log(f"ALERTS: {level}: {msg}", fp)
+        )
         log("ALERTS: enabled", fp)
         return ALERTS
     except Exception as e:
@@ -272,7 +280,14 @@ def alert(event: str, message: str = "", level: str = "info", fp=None, **ctx):
     if not ALERTS:
         return
     try:
-        ALERTS.emit(event=event, message=message, level=level, **ctx)
+        lvl = str(level or "info").upper()
+        ALERTS.emit(
+            event=str(event or "event"),
+            level=lvl,
+            title=str(event or "event"),
+            text=str(message or ""),
+            **ctx
+        )
     except Exception as e:
         # don't spam; just one line
         log(f"ALERTS: emit failed: {e}", fp)
@@ -2798,6 +2813,14 @@ def main():
             if state == "DOWN" and down_streak >= int(cfg["down_confirmations"]):
                 log("CONFIRMED DOWN -> recovery sequence", fp)
 
+                alert(
+                    "confirmed_down",
+                    f"Server '{cfg.get('identity')}' confirmed DOWN -- starting recovery",
+                    level="warning",
+                    fp=fp,
+                    identity=cfg.get("identity")
+                )
+
                 steps = list(cfg["recovery_steps"])
 
                 if parse_bool(cfg.get("forced_wipe_recovery_restart_only_prewipe"), False):
@@ -2827,8 +2850,18 @@ def main():
                     log("Stop requested -- skipping cooldown and exiting", fp)
                     break
 
+                alert(
+                    "recovery_attempted",
+                    f"Recovery sequence finished for '{cfg.get('identity')}' -- steps={steps}",
+                    level="info",
+                    fp=fp,
+                    identity=cfg.get("identity"),
+                    steps=steps
+                )
+
                 log(f"Cooldown {cfg['cooldown_seconds']}s after recovery attempt", fp)
                 sleep_interruptible(int(cfg["cooldown_seconds"]))
+
                 down_streak = 0
 
             else:
@@ -2838,11 +2871,17 @@ def main():
                 if args.once:
                     break
     finally:
+        
+        # // try alerts
         try:
-            if ALERTS and hasattr(ALERTS, "close"):
-                ALERTS.close()
+            if ALERTS:
+                if hasattr(ALERTS, "close"):
+                    ALERTS.close()
+                elif hasattr(ALERTS, "stop"):
+                    ALERTS.stop()
         except Exception:
             pass
+
         release_lock(cfg["lockfile"])
         if fp:
             fp.close()
