@@ -1680,6 +1680,7 @@ def rcon_send(cfg, command: str, fp=None):
 
         deadline = time.monotonic() + 3.0
         last = ""
+        candidate_generic = ""
 
         while time.monotonic() < deadline:
             try:
@@ -1693,18 +1694,50 @@ def rcon_send(cfg, command: str, fp=None):
 
             last = resp
 
-            # Prefer the frame that matches our Identifier
+            # Prefer the frame that matches our Identifier,
+            # but tolerate servers that don't echo Identifier back reliably.
             try:
                 obj = json.loads(resp)
-                if isinstance(obj, dict):
-                    rid = obj.get("Identifier", None)
-                    if rid == ident:
-                        return (True, resp)
-                    # ignore other frames (serverinfo/chat/etc)
-                    continue
             except Exception:
                 # Non-JSON response: treat as reply
                 return (True, resp)
+
+            if not isinstance(obj, dict):
+                continue
+
+            rid = obj.get("Identifier", obj.get("identifier", None))
+            rtype = obj.get("Type", obj.get("type", ""))
+            msg = obj.get("Message", obj.get("message", ""))
+
+            # Identifier can arrive as string (or missing/0)
+            rid_i = None
+            try:
+                if rid is not None and str(rid).strip() != "":
+                    rid_i = int(rid)
+            except Exception:
+                rid_i = None
+
+            # 1) Best case: exact Identifier match
+            if rid_i == ident:
+                return (True, resp)
+
+            # 2) Ignore obvious noise frames
+            t = str(rtype or "").strip().lower()
+            if t in ("serverinfo", "chat"):
+                continue
+
+            # 3) Fallback: if it looks like a command reply (Generic + Message),
+            # stash it in case Identifier never matches.
+            if msg and (t == "" or t == "generic"):
+                candidate_generic = resp
+                continue
+
+            # otherwise keep waiting
+            continue
+
+        # If Identifier never matched, but we saw a plausible Generic reply, use it.
+        if candidate_generic:
+            return (True, candidate_generic)
 
         return (
             False,
