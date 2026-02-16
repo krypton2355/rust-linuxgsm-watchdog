@@ -9,6 +9,8 @@
 # =============================================================
 
 import argparse
+from dataclasses import dataclass
+import errno
 import getpass
 import json
 import os
@@ -31,7 +33,7 @@ except Exception:
     ZoneInfo = None  # type: ignore
     ZoneInfoNotFoundError = Exception  # type: ignore
 
-__version__ = "0.3.0"
+__version__ = "0.3.2"
 
 SMOOTHRESTARTER_URL = "https://umod.org/plugins/smooth-restarter"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -227,6 +229,70 @@ UPDATE_NO_RE  = re.compile(r"\b(no update available|available:\s*no|already up t
 RCON_PW_RE = re.compile(r'(\+rcon\.password\s+)(\".*?\"|\S+)', re.IGNORECASE)
 UNKNOWN_CMD_RE = re.compile(r"\bunknown\s+(command|console\s+command)\b", re.IGNORECASE)
 SR_NAME_RE = re.compile(r"\bsmooth\s*restarter\b", re.IGNORECASE)
+
+# ---------------------------------------------------------
+# HEALTH DIAGNOSIS (mapping: "what went to shit" -> hint)
+# ---------------------------------------------------------
+HEALTH_HINTS = {
+    "OK": "All enabled health checks passed.",
+    "NO_RUSTDEDI_PROCESS": "RustDedicated isn't running. Check LinuxGSM: ./rustserver details, then ./rustserver start.",
+    "IDENTITY_MISMATCH": "RustDedicated is running, but +server.identity doesn't match cfg['identity'].",
+    "RCON_ENDPOINT_MISSING": "No RCON host/port known (autodetect+config both missing). Set rcon_host/rcon_port or run with +rcon.ip/+rcon.port.",
+    "RCON_CONN_REFUSED": "RCON port is closed/refusing. WebRCON not listening, wrong port, or server isn't actually up.",
+    "RCON_TIMEOUT": "TCP connect timed out. Firewall, routing, or server stuck/hung.",
+    "RCON_UNREACHABLE": "Host/network unreachable (bad IP, routing, or interface bind).",
+    "LGSM_STOPPED": "LinuxGSM 'details' reports STOPPED. Try: ./rustserver start or inspect logs.",
+    "LGSM_DETAILS_TIMEOUT": "LinuxGSM 'details' timed out. Script hung; check SteamCMD locks / disk / perms.",
+    "LGSM_DETAILS_ERROR": "LinuxGSM 'details' errored. Check script path/perms and server_dir correctness.",
+}
+
+# Priority order for selecting the "primary cause"
+CAUSE_PRIORITY = [
+    "NO_RUSTDEDI_PROCESS",
+    "IDENTITY_MISMATCH",
+    "RCON_ENDPOINT_MISSING",
+    "RCON_CONN_REFUSED",
+    "RCON_TIMEOUT",
+    "RCON_UNREACHABLE",
+    "LGSM_STOPPED",
+    "LGSM_DETAILS_TIMEOUT",
+    "LGSM_DETAILS_ERROR",
+]
+
+@dataclass
+class HealthCheckResult:
+    name: str
+    ok: bool
+    code: str
+    detail: str
+    weight_up: int = 0
+    weight_down: int = 0
+
+def _pick_primary_cause(results):
+    failing = [r.code for r in results if (r and not r.ok and r.code)]
+    for code in CAUSE_PRIORITY:
+        if code in failing:
+            return code
+    return "OK"
+
+def _tcp_fail_code(e: Exception) -> str:
+    # Most useful buckets first
+    if isinstance(e, ConnectionRefusedError):
+        return "RCON_CONN_REFUSED"
+    if isinstance(e, socket.timeout) or isinstance(e, TimeoutError):
+        return "RCON_TIMEOUT"
+
+    if isinstance(e, OSError):
+        err = getattr(e, "errno", None)
+        if err in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL):
+            return "RCON_UNREACHABLE"
+        if err == errno.ECONNREFUSED:
+            return "RCON_CONN_REFUSED"
+        if err in (errno.ETIMEDOUT,):
+            return "RCON_TIMEOUT"
+
+    # fallback
+    return "RCON_TIMEOUT"
 
 # ---------------------------------------------------------
 # ALERTS (optional module)
@@ -2065,37 +2131,74 @@ def check_server_update_via_lgsm(cfg, server_dir, rustserver_path, fp=None):
     log("UPDATE_WATCH: neither 'check-update' nor 'cu' seems available in this LinuxGSM script", fp)
     return None
 
-def check_process_identity(identity, fp=None):
+def check_process_identity(identity, fp=None) -> HealthCheckResult:
     """
     Strong signal: RustDedicated process exists and commandline contains +server.identity identity
     """
     try:
         out = subprocess.check_output(["pgrep", "-af", "RustDedicated"], text=True).splitlines()
     except subprocess.CalledProcessError:
-        return (False, "no RustDedicated process")
+        return HealthCheckResult(
+            name="process_identity",
+            ok=False,
+            code="NO_RUSTDEDI_PROCESS",
+            detail="no RustDedicated process",
+            weight_down=2,
+        )
+    except Exception as e:
+        return HealthCheckResult(
+            name="process_identity",
+            ok=False,
+            code="NO_RUSTDEDI_PROCESS",
+            detail=f"pgrep failed: {e}",
+            weight_down=2,
+        )
 
-    hits = []
     needle1 = f"+server.identity {identity}"
-    needle2 = f"+server.identity \"{identity}\""
-    for line in out:
-        if needle1 in line or needle2 in line or f"+server.identity {identity} " in line:
-            hits.append(line)
+    needle2 = f'+server.identity "{identity}"'
+    hits = [line for line in out if (needle1 in line or needle2 in line or f"+server.identity {identity} " in line)]
 
     if hits:
-        return (True, f"matched process: {redact_secrets(hits[0])}")
-    return (False, f"RustDedicated running, but identity '{identity}' not found in cmdline")
+        return HealthCheckResult(
+            name="process_identity",
+            ok=True,
+            code="OK",
+            detail=f"matched process: {redact_secrets(hits[0])}",
+            weight_up=2,
+        )
 
-def check_tcp(host, port, timeout_s):
+    return HealthCheckResult(
+        name="process_identity",
+        ok=False,
+        code="IDENTITY_MISMATCH",
+        detail=f"RustDedicated running, but identity '{identity}' not found in cmdline",
+        weight_down=2,
+    )
+
+def check_tcp(host, port, timeout_s) -> HealthCheckResult:
     """
     Medium signal: can open TCP connection to RCON websocket port.
     """
     try:
         with socket.create_connection((host, port), timeout=timeout_s):
-            return (True, f"tcp connect ok {host}:{port}")
+            return HealthCheckResult(
+                name="tcp_rcon",
+                ok=True,
+                code="OK",
+                detail=f"tcp connect ok {host}:{port}",
+                weight_up=1,
+            )
     except Exception as e:
-        return (False, f"tcp connect failed {host}:{port} ({e})")
+        code = _tcp_fail_code(e)
+        return HealthCheckResult(
+            name="tcp_rcon",
+            ok=False,
+            code=code,
+            detail=f"tcp connect failed {host}:{port} ({e})",
+            weight_down=1,
+        )
 
-def check_lgsm_details(server_dir, rustserver_path, timeout_s):
+def check_lgsm_details(server_dir, rustserver_path, timeout_s) -> HealthCheckResult:
     """
     Parse Status: STARTED/STOPPED from ./rustserver details even if it hangs or returns weird rc.
     Never raise; return UNKNOWN on failure.
@@ -2110,16 +2213,54 @@ def check_lgsm_details(server_dir, rustserver_path, timeout_s):
             timeout=timeout_s,
         )
         status = "UNKNOWN"
-        for line in p.stdout.splitlines():
+        for line in (p.stdout or "").splitlines():
             m = STATUS_RE.match(line)
             if m:
                 status = m.group(1).upper()
                 break
-        return (status, p.returncode, p.stdout)
+
+        if status == "STARTED":
+            return HealthCheckResult(
+                name="lgsm_details",
+                ok=True,
+                code="OK",
+                detail=f"status=STARTED rc={p.returncode}",
+                weight_up=1,
+            )
+
+        if status == "STOPPED":
+            return HealthCheckResult(
+                name="lgsm_details",
+                ok=False,
+                code="LGSM_STOPPED",
+                detail=f"status=STOPPED rc={p.returncode}",
+                weight_down=1,
+            )
+
+        return HealthCheckResult(
+            name="lgsm_details",
+            ok=False,
+            code="LGSM_DETAILS_ERROR",
+            detail=f"status={status} rc={p.returncode}",
+            weight_down=1,
+        )
+
     except subprocess.TimeoutExpired:
-        return ("UNKNOWN", "TIMEOUT", f"details timed out after {timeout_s}s")
+        return HealthCheckResult(
+            name="lgsm_details",
+            ok=False,
+            code="LGSM_DETAILS_TIMEOUT",
+            detail=f"details timed out after {timeout_s}s",
+            weight_down=1,
+        )
     except Exception as e:
-        return ("UNKNOWN", "ERROR", f"details error: {e}")
+        return HealthCheckResult(
+            name="lgsm_details",
+            ok=False,
+            code="LGSM_DETAILS_ERROR",
+            detail=f"details error: {e}",
+            weight_down=1,
+        )
 
 def inside_screen_or_tmux():
     return bool(os.environ.get("STY")) or bool(os.environ.get("TMUX"))
@@ -2423,48 +2564,53 @@ def health_report(cfg, server_dir, rustserver_path, fp=None):
     Returns (state, evidence_lines)
     state in: RUNNING, DOWN, UNKNOWN
     """
-    evidence = []
-
-    running_votes = 0
-    down_votes = 0
+    results = []
 
     # 1) Process+identity (strong)
     if cfg.get("check_process_identity", True):
-        ok, msg = check_process_identity(cfg["identity"], fp)
-        evidence.append(f"process_identity: {'PASS' if ok else 'FAIL'} -- {msg}")
-        if ok: running_votes += 2  # weight it
-        else: down_votes += 1
+        results.append(check_process_identity(cfg["identity"], fp))
 
     # 2) TCP connect to RCON port (medium)
     if cfg.get("check_tcp_rcon", True):
         ip, port, _pw, src = get_rcon_endpoint(cfg, fp=fp, need_password=False)
         if ip and port:
-            ok, msg = check_tcp(ip, port, float(cfg["tcp_timeout"]))
-            msg = f"{msg} (src={src})"
+            r = check_tcp(ip, port, float(cfg["tcp_timeout"]))
+            r.detail = f"{r.detail} (src={src})"
+            results.append(r)
         else:
-            ok, msg = (False, "no RCON endpoint (autodetect+config both missing)")
+            results.append(HealthCheckResult(
+                name="tcp_rcon",
+                ok=False,
+                code="RCON_ENDPOINT_MISSING",
+                detail="no RCON endpoint (autodetect+config both missing)",
+                weight_down=1,
+            ))
 
-        evidence.append(f"tcp_rcon: {'PASS' if ok else 'FAIL'} -- {msg}")
-        if ok:
-            running_votes += 1
-        else:
-            down_votes += 1
-
-    # 3) LGSM details (weak-ish, but informative)
+    # 3) LGSM details (weak-ish but informative)
     if cfg.get("check_lgsm_details", True):
-        status, rc, out = check_lgsm_details(server_dir, rustserver_path, int(cfg["details_timeout"]))
-        evidence.append(f"lgsm_details: status={status} rc={rc}")
-        # IMPORTANT: ignore rc; trust parsed status if present
-        if status == "STARTED":
-            running_votes += 1
-        elif status == "STOPPED":
-            down_votes += 1
+        results.append(check_lgsm_details(server_dir, rustserver_path, int(cfg["details_timeout"])))
 
-    if running_votes > 0:
-        return ("RUNNING", evidence)
-    if down_votes > 0:
-        return ("DOWN", evidence)
-    return ("UNKNOWN", evidence)
+    up = sum(r.weight_up for r in results if r.ok)
+    down = sum(r.weight_down for r in results if not r.ok)
+
+    if up > 0:
+        state = "RUNNING"
+    elif down > 0:
+        state = "DOWN"
+    else:
+        state = "UNKNOWN"
+
+    primary = _pick_primary_cause(results)
+    hint = HEALTH_HINTS.get(primary, "")
+
+    evidence = []
+    if primary != "OK":
+        evidence.append(f"PRIMARY_CAUSE: {primary} -- {hint}")
+
+    for r in results:
+        evidence.append(f"{r.name}: {'PASS' if r.ok else 'FAIL'} [{r.code}] -- {r.detail}")
+
+    return (state, evidence)
 
 def main():
     ap = argparse.ArgumentParser()
