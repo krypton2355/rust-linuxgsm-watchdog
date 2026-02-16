@@ -1649,13 +1649,13 @@ def rcon_extract_message(resp: str) -> str:
 def rcon_send(cfg, command: str, fp=None):
     """
     Send a command via Rust WebRCON and return (ok, response_text).
-    """
-    
-    # // old autodetection method    
-    # ip, port, pw = detect_rcon_from_identity(cfg)
-    # if not (ip and port and pw):
-    #     return (False, "RCON autodetect failed (missing ip/port/password)")
 
+    IMPORTANT:
+    - Rust WebRCON's Identifier is effectively a 32-bit-ish integer in practice.
+      Using epoch *milliseconds* can overflow/mismatch and you'll never see a match,
+      which breaks plugin checks (oxide.plugins / sr status).
+    - We therefore generate a 31-bit safe Identifier and wait for the matching frame.
+    """
     ip, port, pw, src = get_rcon_endpoint(cfg, fp=fp)
     if not (ip and port and pw):
         return (False, "RCON endpoint missing (autodetect+config)")
@@ -1669,7 +1669,15 @@ def rcon_send(cfg, command: str, fp=None):
     pw_enc = quote(pw, safe="")   # encode everything unsafe
     url = f"ws://{ip}:{port}/{pw_enc}"
 
-    ident = int(time.time() * 1000)  # unique-ish (ms)
+    # 31-bit safe Identifier (avoid ms epoch overflow / mismatch)
+    ident = (
+        (int(time.time()) << 10) ^
+        (os.getpid() & 0x3FF) ^
+        (int(time.monotonic() * 1000) & 0x3FF)
+    ) & 0x7FFFFFFF
+    if ident == 0:
+        ident = 1
+
     payload = {"Identifier": ident, "Message": command, "Name": "watchdog"}
 
     ws = None
@@ -1678,7 +1686,7 @@ def rcon_send(cfg, command: str, fp=None):
         ws.settimeout(1.0)  # short recv timeout; we loop ourselves
         ws.send(json.dumps(payload))
 
-        deadline = time.monotonic() + 3.0
+        deadline = time.monotonic() + 5.0
         last = ""
         candidate_generic = ""
 
@@ -1692,50 +1700,55 @@ def rcon_send(cfg, command: str, fp=None):
             if not resp:
                 continue
 
+            if isinstance(resp, bytes):
+                resp = resp.decode("utf-8", errors="replace")
+
             last = resp
 
-            # Prefer the frame that matches our Identifier,
-            # but tolerate servers that don't echo Identifier back reliably.
+            # Try JSON decode (WebRCON usually returns a JSON object)
             try:
                 obj = json.loads(resp)
             except Exception:
                 # Non-JSON response: treat as reply
                 return (True, resp)
 
+            # Sometimes we might get a list/array; scan it for our Identifier
+            if isinstance(obj, list):
+                for it in obj:
+                    if not isinstance(it, dict):
+                        continue
+                    rid = it.get("Identifier", it.get("identifier", None))
+                    try:
+                        rid_i = int(rid) if rid is not None else None
+                    except Exception:
+                        rid_i = None
+                    if rid_i == ident:
+                        return (True, resp)
+                continue
+
             if not isinstance(obj, dict):
                 continue
 
             rid = obj.get("Identifier", obj.get("identifier", None))
-            rtype = obj.get("Type", obj.get("type", ""))
-            msg = obj.get("Message", obj.get("message", ""))
-
-            # Identifier can arrive as string (or missing/0)
-            rid_i = None
             try:
-                if rid is not None and str(rid).strip() != "":
-                    rid_i = int(rid)
+                rid_i = int(rid) if rid is not None else None
             except Exception:
                 rid_i = None
 
-            # 1) Best case: exact Identifier match
             if rid_i == ident:
                 return (True, resp)
 
-            # 2) Ignore obvious noise frames
-            t = str(rtype or "").strip().lower()
+            # Ignore noise frames
+            t = str(obj.get("Type", obj.get("type", "")) or "").strip().lower()
             if t in ("serverinfo", "chat"):
                 continue
 
-            # 3) Fallback: if it looks like a command reply (Generic + Message),
-            # stash it in case Identifier never matches.
+            # Fallback candidate: Generic frames with a Message (some servers are sloppy about Identifier)
+            msg = obj.get("Message", obj.get("message", ""))
             if msg and (t == "" or t == "generic"):
                 candidate_generic = resp
                 continue
 
-            # otherwise keep waiting
-            continue
-
-        # If Identifier never matched, but we saw a plausible Generic reply, use it.
         if candidate_generic:
             return (True, candidate_generic)
 
