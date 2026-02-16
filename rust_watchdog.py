@@ -31,7 +31,7 @@ except Exception:
     ZoneInfo = None  # type: ignore
     ZoneInfoNotFoundError = Exception  # type: ignore
 
-__version__ = "0.2.91"
+__version__ = "0.2.92"
 
 SMOOTHRESTARTER_URL = "https://umod.org/plugins/smooth-restarter"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -281,6 +281,29 @@ def alert(event: str, message: str = "", level: str = "info", fp=None, **ctx):
 # Optional dependency: websocket-client (for Rust WebRCON)
 # ---------------------------------------------------------
 _WS_CACHE = {"checked": False, "ok": False, "err": ""}
+
+# rcon endpoint checker
+def get_rcon_endpoint(cfg, fp=None, *, need_password=True):
+    # 1) autodetect from RustDedicated cmdline
+    ip, port, pw = detect_rcon_from_identity(cfg)
+    if ip and port and (pw or not need_password):
+        return (ip, int(port), pw, "autodetect")
+
+    # 2) fallback to config (support both rcon_ip and old rcon_host)
+    ip = (cfg.get("rcon_ip") or cfg.get("rcon_host") or "").strip()
+    pw = (cfg.get("rcon_password") or "").strip()
+    try:
+        port = int(cfg.get("rcon_port", 0))
+    except Exception:
+        port = 0
+
+    if ip == "0.0.0.0":
+        ip = "127.0.0.1"
+
+    if ip and (1 <= port <= 65535) and (pw or not need_password):
+        return (ip, port, pw, "config")
+
+    return (None, None, None, "missing")
 
 def websocket_dep_status():
     """
@@ -1176,9 +1199,9 @@ def smoothrestarter_loaded_via_rcon(cfg, fp=None):
     if not ok_ws:
         return ("SKIPPED", f"websocket-client missing ({ws_err})")
 
-    ip, port, pw = detect_rcon_from_identity(cfg)
+    ip, port, pw, src = get_rcon_endpoint(cfg, fp=fp, need_password=True)
     if not (ip and port and pw):
-        return ("SKIPPED", "RCON autodetect failed (missing ip/port/password)")
+        return ("SKIPPED", "RCON endpoint missing (autodetect+config)")
 
     # 1) Try framework plugin list commands (best signal)
     probe_cmds = [
@@ -1627,9 +1650,15 @@ def rcon_send(cfg, command: str, fp=None):
     """
     Send a command via Rust WebRCON and return (ok, response_text).
     """
-    ip, port, pw = detect_rcon_from_identity(cfg)
+    
+    # // old autodetection method    
+    # ip, port, pw = detect_rcon_from_identity(cfg)
+    # if not (ip and port and pw):
+    #     return (False, "RCON autodetect failed (missing ip/port/password)")
+
+    ip, port, pw, src = get_rcon_endpoint(cfg, fp=fp)
     if not (ip and port and pw):
-        return (False, "RCON autodetect failed (missing ip/port/password)")
+        return (False, "RCON endpoint missing (autodetect+config)")
 
     ok_ws, ws_err = websocket_dep_status()
     if not ok_ws:
@@ -1697,6 +1726,8 @@ def _parse_tmux_l_and_s_from_cmdline(line: str):
 
     return (l_name, s_name)
 
+## // NOTE: this detection method is basically NOT in use!
+## // We're using RCON by default
 def detect_lgsm_tmux_context(cfg, fp=None):
     """
     Find the LinuxGSM tmux server socket (-L name) and tmux session (-s name)
@@ -2312,7 +2343,13 @@ def health_report(cfg, server_dir, rustserver_path, fp=None):
 
     # 2) TCP connect to RCON port (medium)
     if cfg.get("check_tcp_rcon", True):
-        ok, msg = check_tcp(cfg["rcon_host"], int(cfg["rcon_port"]), float(cfg["tcp_timeout"]))
+        ip, port, _pw, src = get_rcon_endpoint(cfg, fp=fp, need_password=False)
+        if ip and port:
+            ok, msg = check_tcp(ip, port, float(cfg["tcp_timeout"]))
+            msg = f"{msg} (src={src})"
+        else:
+            ok, msg = (False, "no RCON endpoint (autodetect+config both missing)")
+
         evidence.append(f"tcp_rcon: {'PASS' if ok else 'FAIL'} -- {msg}")
         if ok:
             running_votes += 1
