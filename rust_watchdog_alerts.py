@@ -166,6 +166,37 @@ class AlertManager:
     Config lives under cfg["alerts"].
     """
 
+    def _emoji_for(self, alert: Alert) -> str:
+        try:
+            e = self.emoji_by_event.get(alert.event)
+            if e:
+                return str(e)
+            return str(self.emoji_by_level.get(str(alert.level).upper(), ""))
+        except Exception:
+            return ""
+
+    def _app_label_for(self, alert: Alert) -> str:
+        app = str(alert.fields.get("app") or self.app_default).strip()
+        ver = str(alert.fields.get("version") or self.version_default).strip()
+        return f"{app} {ver}".strip()
+
+    def _title_for(self, alert: Alert) -> str:
+        # If caller didn’t provide a meaningful title, use event_titles mapping
+        t = (alert.title or "").strip()
+        if (not t) or (t == alert.event):
+            mapped = self.event_titles.get(alert.event)
+            if mapped:
+                return str(mapped)
+        return t or alert.event
+
+    def _body_for(self, alert: Alert) -> str:
+        body = (alert.text or "").strip()
+        if not body:
+            mapped = self.event_bodies.get(alert.event)
+            if mapped:
+                return str(mapped)
+        return body
+
     def __init__(
         self,
         cfg: Dict[str, Any],
@@ -186,6 +217,15 @@ class AlertManager:
 
         self.include_host = bool(self.cfg.get("include_host", True))
         self.include_identity = bool(self.cfg.get("include_identity", True))
+
+        self.app_default = str(self.cfg.get("app", "rust-linuxgsm-watchdog"))
+        self.version_default = str(self.cfg.get("version", "")).strip()
+
+        self.emoji_by_event = self.cfg.get("emoji_by_event", {}) or {}
+        self.emoji_by_level = self.cfg.get("emoji_by_level", {}) or {}
+
+        self.event_titles = self.cfg.get("event_titles", {}) or {}
+        self.event_bodies = self.cfg.get("event_bodies", {}) or {}
 
         self._q: "queue.Queue[Alert]" = queue.Queue(maxsize=max_queue)
         self._stop = threading.Event()
@@ -340,9 +380,14 @@ class AlertManager:
         ts_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(alert.ts))
         parts: List[str] = []
 
-        lvl = html.escape(alert.level)
-        title = html.escape(alert.title)
-        parts.append(f"<b>{lvl}</b> -- <b>{title}</b>")
+        # lvl = html.escape(alert.level)
+        # title = html.escape(alert.title)
+
+        emoji = self._emoji_for(alert)
+        label = self._app_label_for(alert)
+        title = self._title_for(alert)
+
+        parts.append(f"{html.escape(emoji)} <b>{html.escape(label)}</b> -- <b>{html.escape(title)}</b>")
         parts.append(f"<code>{html.escape(ts_s)}</code>")
 
         if self.include_host:
@@ -353,8 +398,9 @@ class AlertManager:
             if ident:
                 parts.append(f"<code>identity={html.escape(str(ident))}</code>")
 
-        if alert.text.strip():
-            parts.append(html.escape(alert.text.strip()))
+        body = self._body_for(alert)
+        if body:
+            parts.append(html.escape(body))
 
         # Add a few structured fields (keep it short)
         extras = []
@@ -376,7 +422,10 @@ class AlertManager:
 
     def _render_plain(self, alert: Alert) -> str:
         ts_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(alert.ts))
-        parts: List[str] = [f"{alert.level} -- {alert.title}", ts_s]
+        emoji = self._emoji_for(alert)
+        label = self._app_label_for(alert)
+        title = self._title_for(alert)
+        parts: List[str] = [f"{emoji} {label} -- {title}".strip(), ts_s]
 
         if self.include_host:
             parts.append(f"host={_hostname()}")
@@ -386,12 +435,13 @@ class AlertManager:
             if ident:
                 parts.append(f"identity={ident}")
 
-        if alert.text.strip():
-            parts.append(alert.text.strip())
+        body = self._body_for(alert)
+        if body:
+            parts.append(body)
 
         extras = []
         for k, v in (alert.fields or {}).items():
-            if k in ("identity",):
+            if k in ("identity", "app", "version"):
                 continue
             if v is None:
                 continue

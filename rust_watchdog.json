@@ -74,15 +74,34 @@
   "alerts": {
     "enabled": false,
     "backends": ["telegram"],
-
-    "state_path": "/home/rustserver/rust-linuxgsm-watchdog/data/state/alerts_state.json",
-
     "cooldown_seconds_default": 900,
     "dedupe_seconds": 300,
-
     "include_host": true,
     "include_identity": true,
-
+    "emoji_by_level": {
+      "INFO": "ℹ️",
+      "WARN": "⚠️",
+      "ERROR": "🚨",
+      "CRITICAL": "🛑"
+    },
+    "emoji_by_event": {
+      "watchdog_started": "🟢",
+      "startup_ok": "✅",
+      "server_down": "🔴",
+      "server_recovered": "🟢",
+      "update_available": "⬆️",
+      "update_applied": "✅"
+    },
+    "event_titles": {
+      "watchdog_started": "started",
+      "startup_ok": "startup checks passed",
+      "server_down": "server DOWN",
+      "server_recovered": "server OK"
+    },
+    "event_bodies": {
+      "watchdog_started": "watchdog loop online",
+      "startup_ok": "server looks healthy (process + RCON ok)"
+    },
     "telegram": {
       "token_env": "RUST_WD_TELEGRAM_TOKEN",
       "chat_ids_env": "RUST_WD_TELEGRAM_CHAT_IDS",
@@ -90,19 +109,6 @@
       "disable_web_preview": true,
       "timeout_s": 8,
       "preflight_getme": true
-    },
-
-    "discord": {
-      "webhook_env": "RUST_WD_DISCORD_WEBHOOK",
-      "timeout_s": 8
-    },
-
-    "cooldowns": {
-      "server_down": 900,
-      "server_recovered": 300,
-      "update_available": 1800,
-      "update_applied": 600,
-      "forced_wipe_soon": 3600
     }
   }
 }
