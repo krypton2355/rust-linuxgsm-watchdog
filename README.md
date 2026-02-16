@@ -322,6 +322,11 @@ Run the watchdog outside tmux/screen (systemd recommended) so recovery isn’t b
 ---
 
 ### History
+- v0.3.0
+  **Fixed:**
+  - SmoothRestarter runtime-loaded checks no longer misread unrelated WebRCON frames (serverinfo/chat/keepalive).
+  - Reduced flakiness in RCON-based chat announcements and SR "ceremony" tests.
+  - WebRCON receive logic now ignores non-matching frames until deadline; failures are surfaced as a timeout error instead of returning random frames.
 - v0.2.9 - More detailed Smooth Restarter Oxide/Carbon checkup
 - v0.2.8 - Rudimentary checks on [Smooth Restarter](https://umod.org/plugins/smooth-restarter) integrity; more bug fixes
 - v0.2.7 - Small bugfixes
