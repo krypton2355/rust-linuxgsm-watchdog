@@ -9,13 +9,31 @@ User=rustserver
 Group=rustserver
 WorkingDirectory=/home/rustserver/rust-linuxgsm-watchdog
 
-# // alt method below for those not using the .venv
-# ExecStart=/usr/bin/python3 /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.py --config /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.json
+# Create a private runtime dir under /run for a lockfile
+RuntimeDirectory=rust-watchdog
+RuntimeDirectoryMode=0755
 
-ExecStart=/home/rustserver/rust-linuxgsm-watchdog/.venv/bin/python /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.py --config /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.json
-Restart=always
+# HARD LOCK: prevent multiple watchdog instances (and duplicate RustDedicated)
+# venv method:
+ExecStart=/usr/bin/flock -n /run/rust-watchdog/lock \
+  /home/rustserver/rust-linuxgsm-watchdog/.venv/bin/python \
+  /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.py \
+  --config /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.json
+
+# alt method (no venv):
+# ExecStart=/usr/bin/flock -n /run/rust-watchdog/lock \
+#   /usr/bin/python3 \
+#   /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.py \
+#   --config /home/rustserver/rust-linuxgsm-watchdog/rust_watchdog.json
+
+# Restart only when the watchdog crashes / exits non-zero
+Restart=on-failure
 RestartSec=5
-KillMode=process
+
+# On stop/restart, kill the whole cgroup (watchdog + tmux/RustDedicated it spawned).
+# (KillMode defaults to control-group; leaving it unset is fine.)
+KillSignal=SIGINT
+TimeoutStopSec=30
 
 NoNewPrivileges=true
 PrivateTmp=true
