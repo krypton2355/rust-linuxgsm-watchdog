@@ -322,6 +322,11 @@ Run the watchdog outside tmux/screen (systemd recommended) so recovery isn’t b
 ---
 
 ### History
+- v0.3.3
+  **Fixed / Added:**
+  - Prevent multiple watchdog instances from running at once (fixes “double processes” / duplicate recovery behavior).
+  - Added alerts support with Telegram backend (dedupe + cooldown; configurable titles/bodies/emoji).
+  - Discord and other API alert backends: sketched out in the code / WIP.
 - v0.3.0
   **Fixed:**
   - SmoothRestarter runtime-loaded checks no longer misread unrelated WebRCON frames (serverinfo/chat/keepalive).
