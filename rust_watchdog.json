@@ -88,15 +88,21 @@
       "watchdog_started": "🟢",
       "startup_ok": "✅",
       "server_down": "🔴",
-      "server_recovered": "🟢",
+      "server_recovered": "✅",
+      "recovery_attempted": "⚠️",
+      "recovery_failed": "🚨",
       "update_available": "⬆️",
       "update_applied": "✅"
     },
     "event_titles": {
-      "watchdog_started": "started",
-      "startup_ok": "startup checks passed",
-      "server_down": "server DOWN",
-      "server_recovered": "server OK"
+      "watchdog_started": "🟢",
+      "startup_ok": "✅",
+      "server_down": "🔴",
+      "server_recovered": "✅",
+      "recovery_attempted": "⚠️",
+      "recovery_failed": "🚨",
+      "update_available": "⬆️",
+      "update_applied": "✅"
     },
     "event_bodies": {
       "watchdog_started": "watchdog loop online",

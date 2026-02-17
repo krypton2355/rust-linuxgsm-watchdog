@@ -2698,7 +2698,7 @@ def main():
 
     # init alerts if in use
     init_alerts(cfg, fp)
-    alert("watchdog_start", f"rust-linuxgsm-watchdog v{__version__} started", fp=fp,
+    alert("watchdog_started", f"rust-linuxgsm-watchdog v{__version__} started", fp=fp,
         identity=cfg.get("identity"), dry_run=cfg.get("dry_run"))
 
     # One-time dependency hint
@@ -3000,7 +3000,7 @@ def main():
                 log("CONFIRMED DOWN -> recovery sequence", fp)
 
                 alert(
-                    "confirmed_down",
+                    "server_down",
                     f"Server '{cfg.get('identity')}' confirmed DOWN -- starting recovery",
                     level="warning",
                     fp=fp,
@@ -3038,15 +3038,42 @@ def main():
 
                 alert(
                     "recovery_attempted",
-                    f"Recovery sequence finished for '{cfg.get('identity')}' -- steps={steps}",
-                    level="info",
+                    f"Recovery sequence finished for '{cfg.get('identity')}'",
+                    level="warning",
                     fp=fp,
                     identity=cfg.get("identity"),
-                    steps=steps
+                    steps=steps,
                 )
 
-                log(f"Cooldown {cfg['cooldown_seconds']}s after recovery attempt", fp)
-                sleep_interruptible(int(cfg["cooldown_seconds"]))
+                cooldown = int(cfg.get("cooldown_seconds", 0) or 0)
+                if cooldown > 0:
+                    log(f"Cooldown {cooldown}s after recovery -- waiting before health re-check", fp)
+                    sleep_interruptible(cooldown)
+
+                if stop_requested:
+                    log("Stop requested during cooldown -- exiting", fp)
+                    break
+
+                st2, ev2 = health_report(cfg, server_dir, rustserver_path, fp)
+
+                if st2 == "RUNNING":
+                    alert(
+                        "server_recovered",
+                        f"Server '{cfg.get('identity')}' is RUNNING -- cooldown passed",
+                        level="info",
+                        fp=fp,
+                        identity=cfg.get("identity"),
+                    )
+                else:
+                    primary = next((l for l in ev2 if l.startswith("PRIMARY_CAUSE:")), "")
+                    alert(
+                        "recovery_failed",
+                        f"Recovery finished, but server health is {st2}",
+                        level="error",
+                        fp=fp,
+                        identity=cfg.get("identity"),
+                        primary_cause=primary,
+                    )
 
                 down_streak = 0
 
